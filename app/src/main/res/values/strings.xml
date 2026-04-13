@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UpCap</string>
+    <string name="home_title">UpCap</string>
+    <string name="home_subtitle">AI 비디오 업스케일 &amp; 자막</string>
+    <string name="select_video">영상 선택</string>
+    <string name="mode_upscale">업스케일</string>
+    <string name="mode_subtitle">자막 생성</string>
+    <string name="mode_both">업스케일 + 자막</string>
+    <string name="mode_upscale_desc">720p → 1080p AI 해상도 향상</string>
+    <string name="mode_subtitle_desc">한국어 음성 인식 자동 자막</string>
+    <string name="mode_both_desc">해상도 향상 + 자동 자막 동시 적용</string>
+    <string name="start_processing">시작</string>
+    <string name="processing_title">처리 중</string>
+    <string name="processing_upscale">영상 업스케일 중...</string>
+    <string name="processing_subtitle">자막 생성 중...</string>
+    <string name="processing_export">내보내기 중...</string>
+    <string name="processing_cancel">취소</string>
+    <string name="processing_eta">예상 남은 시간: %s</string>
+    <string name="editor_title">자막 편집</string>
+    <string name="editor_done">완료</string>
+    <string name="editor_split">분할</string>
+    <string name="editor_merge">병합</string>
+    <string name="editor_delete">삭제</string>
+    <string name="preview_title">미리보기</string>
+    <string name="preview_save">갤러리에 저장</string>
+    <string name="preview_share">공유</string>
+    <string name="notification_channel">영상 처리</string>
+    <string name="notification_processing">영상을 처리하고 있습니다</string>
+    <string name="video_info">%s · %s · %s</string>
+    <string name="no_video_selected">영상을 선택해주세요</string>
+    <string name="save_success">갤러리에 저장되었습니다</string>
+    <string name="error_unsupported_codec">지원하지 않는 영상 형식입니다</string>
+    <string name="error_too_long">10분 이하 영상만 처리할 수 있습니다</string>
+    <string name="error_low_memory">메모리가 부족합니다. 다른 앱을 종료하고 다시 시도해주세요</string>
+</resources>
