@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // ffmpeg-kit Maven repo — enable when integrating ffmpeg-kit
+        // maven { url = uri("https://maven.pkg.github.com/arthenica/ffmpeg-kit") }
     }
 }
 

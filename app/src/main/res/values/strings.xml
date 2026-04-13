@@ -27,7 +27,7 @@
     <string name="preview_share">공유</string>
     <string name="notification_channel">영상 처리</string>
     <string name="notification_processing">영상을 처리하고 있습니다</string>
-    <string name="video_info">%s · %s · %s</string>
+    <string name="video_info" formatted="false">%s · %s · %s</string>
     <string name="no_video_selected">영상을 선택해주세요</string>
     <string name="save_success">갤러리에 저장되었습니다</string>
     <string name="error_unsupported_codec">지원하지 않는 영상 형식입니다</string>

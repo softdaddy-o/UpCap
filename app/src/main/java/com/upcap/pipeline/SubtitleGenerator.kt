@@ -2,8 +2,6 @@ package com.upcap.pipeline
 
 import android.content.Context
 import android.net.Uri
-import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.ReturnCode
 import com.upcap.model.SubtitleSegment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -18,32 +16,23 @@ class SubtitleGenerator @Inject constructor(
     /**
      * Generate subtitles from video audio.
      *
-     * MVP: Extracts audio via FFmpeg, then generates sample subtitles.
+     * MVP: Generates sample Korean subtitles for demonstration.
      * When whisper.cpp JNI bridge is integrated, this will use the Whisper small model
      * for Korean speech-to-text with word-level timestamps.
      */
     fun generate(videoUri: Uri): Flow<SubtitleResult> = flow {
         emit(SubtitleResult.Progress(0.1f))
 
-        // Step 1: Extract audio to WAV (16kHz mono for Whisper)
-        val audioPath = File(context.cacheDir, "audio_${System.currentTimeMillis()}.wav").absolutePath
-        val inputPath = copyToLocal(videoUri)
-
-        val extractCommand = "-i \"$inputPath\" -ar 16000 -ac 1 -acodec pcm_s16le -y \"$audioPath\""
-        val extractSession = FFmpegKit.execute(extractCommand)
-
-        if (!ReturnCode.isSuccess(extractSession.returnCode)) {
-            emit(SubtitleResult.Error("오디오 추출 실패"))
-            return@flow
-        }
-
+        // Step 1: Audio extraction placeholder
+        // In production: MediaExtractor → PCM 16kHz mono for Whisper
+        kotlinx.coroutines.delay(500)
         emit(SubtitleResult.Progress(0.3f))
 
         // Step 2: Run STT
         // MVP: Generate placeholder subtitles for demonstration
-        // TODO: Integrate whisper.cpp JNI for real Korean STT
+        // Production: whisper.cpp JNI → word-level timestamps → grouping
+        kotlinx.coroutines.delay(500)
         val subtitles = generateMockSubtitles()
-
         emit(SubtitleResult.Progress(0.9f))
 
         // Step 3: Generate SRT file
@@ -52,10 +41,6 @@ class SubtitleGenerator @Inject constructor(
 
         emit(SubtitleResult.Progress(1.0f))
         emit(SubtitleResult.Success(subtitles, srtPath))
-
-        // Clean up
-        File(audioPath).delete()
-        File(inputPath).delete()
     }.flowOn(Dispatchers.IO)
 
     /**
@@ -63,7 +48,7 @@ class SubtitleGenerator @Inject constructor(
      * - Max 16 characters per line
      * - Max 2 lines per segment
      * - 3-7 second duration per segment
-     * - Split at sentence boundaries (마침표, 물음표, 느낌표)
+     * - Split at sentence boundaries
      */
     fun groupWordsIntoSegments(
         words: List<WordTimestamp>
@@ -82,7 +67,6 @@ class SubtitleGenerator @Inject constructor(
                     (word.endMs - segmentWords.first().startMs) > 7000
 
             if (wouldExceedDuration || (wouldExceedLine && lineCount >= 2)) {
-                // Commit current segment
                 if (segmentWords.isNotEmpty()) {
                     segments.add(createSegment(id++, segmentWords))
                     segmentWords = mutableListOf()
@@ -97,7 +81,6 @@ class SubtitleGenerator @Inject constructor(
             segmentWords.add(word)
             lineLength += word.text.length
 
-            // Split at sentence boundaries
             if (word.text.endsWith(".") || word.text.endsWith("?") ||
                 word.text.endsWith("!") || word.text.endsWith("다") ||
                 word.text.endsWith("요")
@@ -122,7 +105,6 @@ class SubtitleGenerator @Inject constructor(
 
     private fun createSegment(id: Int, words: List<WordTimestamp>): SubtitleSegment {
         val text = words.joinToString("") { it.text }
-        // Apply Korean line breaking: max 16 chars per line
         val lines = mutableListOf<String>()
         var current = StringBuilder()
         for (char in text) {
@@ -150,7 +132,6 @@ class SubtitleGenerator @Inject constructor(
     }
 
     private fun generateMockSubtitles(): List<SubtitleSegment> {
-        // Demo subtitles for MVP testing
         return listOf(
             SubtitleSegment(0, 500, 3000, "안녕하세요, UpCap입니다"),
             SubtitleSegment(1, 3500, 6500, "AI로 자막을 자동 생성합니다"),
@@ -158,16 +139,6 @@ class SubtitleGenerator @Inject constructor(
             SubtitleSegment(3, 10500, 14000, "타이밍도 조절 가능합니다"),
             SubtitleSegment(4, 14500, 18000, "완료되면 바로 공유하세요")
         )
-    }
-
-    private fun copyToLocal(uri: Uri): String {
-        val tempFile = File(context.cacheDir, "sub_input_${System.currentTimeMillis()}.mp4")
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            tempFile.outputStream().use { output ->
-                input.copyTo(output)
-            }
-        }
-        return tempFile.absolutePath
     }
 
     data class WordTimestamp(
