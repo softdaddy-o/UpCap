@@ -1,20 +1,56 @@
 package com.upcap.ui.preview
 
-import androidx.compose.foundation.layout.*
+import android.net.Uri
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -23,9 +59,24 @@ fun PreviewScreen(
     onBackHome: () -> Unit,
     viewModel: PreviewViewModel = hiltViewModel()
 ) {
+    val context = LocalContext.current
     val saveState by viewModel.saveState.collectAsState()
+    val outputFile = remember(outputPath) { File(outputPath) }
+    val exoPlayer = remember(outputPath) {
+        ExoPlayer.Builder(context).build().apply {
+            repeatMode = Player.REPEAT_MODE_ONE
+            playWhenReady = false
+            if (outputFile.exists()) {
+                setMediaItem(MediaItem.fromUri(Uri.fromFile(outputFile)))
+                prepare()
+            }
+        }
+    }
 
-    // Show snackbar on save success
+    DisposableEffect(exoPlayer) {
+        onDispose { exoPlayer.release() }
+    }
+
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(saveState) {
         when (saveState) {
@@ -37,7 +88,7 @@ fun PreviewScreen(
                     (saveState as PreviewViewModel.SaveState.Error).message
                 )
             }
-            else -> {}
+            else -> Unit
         }
     }
 
@@ -53,7 +104,7 @@ fun PreviewScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackHome) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "뒤로")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -68,7 +119,6 @@ fun PreviewScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Video player
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -81,44 +131,57 @@ fun PreviewScreen(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant
                     )
                 ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        // ExoPlayer placeholder
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                    if (outputFile.exists()) {
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { viewContext ->
+                                PlayerView(viewContext).apply {
+                                    useController = true
+                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    player = exoPlayer
+                                }
+                            },
+                            update = { playerView ->
+                                playerView.player = exoPlayer
+                            }
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.PlayCircle,
-                                contentDescription = null,
-                                modifier = Modifier.size(64.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                "처리 완료",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                outputPath.substringAfterLast("/"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "출력 파일을 찾을 수 없습니다",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    outputFile.name,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            // Action buttons
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Save to gallery
                 Button(
                     onClick = { viewModel.saveToGallery(outputPath) },
                     modifier = Modifier
@@ -140,7 +203,7 @@ fun PreviewScreen(
                             modifier = Modifier.size(22.dp)
                         )
                     }
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.size(10.dp))
                     Text(
                         "갤러리에 저장",
                         style = MaterialTheme.typography.titleMedium,
@@ -148,7 +211,6 @@ fun PreviewScreen(
                     )
                 }
 
-                // Share
                 OutlinedButton(
                     onClick = { viewModel.shareVideo(outputPath) },
                     modifier = Modifier
@@ -161,14 +223,13 @@ fun PreviewScreen(
                         contentDescription = null,
                         modifier = Modifier.size(22.dp)
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.size(10.dp))
                     Text(
                         "공유",
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
 
-                // Back to home
                 TextButton(
                     onClick = onBackHome,
                     modifier = Modifier.fillMaxWidth()
