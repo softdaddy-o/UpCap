@@ -1,6 +1,11 @@
 package com.upcap.ui.home
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -22,9 +27,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
 import com.upcap.model.ProcessingMode
@@ -37,14 +44,41 @@ fun HomeScreen(
     onStartProcessing: (Uri, ProcessingMode) -> Unit,
     viewModel: HomeViewModel = hiltViewModel()
 ) {
+    val context = LocalContext.current
     val videoInfo by viewModel.videoInfo.collectAsState()
     val selectedMode by viewModel.selectedMode.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val mediaPermission = remember { requiredVideoPermission() }
+    val shouldAutoloadTestVideo = remember { shouldAutoloadDebugVideo(context) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted && videoInfo == null) {
+            viewModel.tryLoadTestVideo()
+        }
+    }
 
     val videoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
+        android.util.Log.d("UpCap", "Picker result uri: $uri")
         uri?.let { viewModel.selectVideo(it) }
+    }
+
+    // Keep direct shared-storage auto-load as a debug convenience for emulators.
+    LaunchedEffect(videoInfo, shouldAutoloadTestVideo, mediaPermission) {
+        if (!shouldAutoloadTestVideo || videoInfo != null) {
+            return@LaunchedEffect
+        }
+
+        if (mediaPermission == null ||
+            ContextCompat.checkSelfPermission(context, mediaPermission) == PackageManager.PERMISSION_GRANTED
+        ) {
+            viewModel.tryLoadTestVideo()
+        } else {
+            permissionLauncher.launch(mediaPermission)
+        }
     }
 
     Scaffold(
@@ -81,7 +115,7 @@ fun HomeScreen(
 
             // Video selection card
             Card(
-                onClick = { videoPicker.launch("video/mp4") },
+                onClick = { videoPicker.launch("video/*") },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(if (videoInfo != null) 160.dp else 180.dp),
@@ -266,6 +300,35 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
+}
+
+private fun requiredVideoPermission(): String? =
+    when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> Manifest.permission.READ_MEDIA_VIDEO
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> Manifest.permission.READ_EXTERNAL_STORAGE
+        else -> null
+    }
+
+private fun shouldAutoloadDebugVideo(context: Context): Boolean {
+    val isDebuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (!isDebuggable) {
+        return false
+    }
+
+    val fingerprint = Build.FINGERPRINT.lowercase()
+    val model = Build.MODEL.lowercase()
+    val manufacturer = Build.MANUFACTURER.lowercase()
+    val brand = Build.BRAND.lowercase()
+    val device = Build.DEVICE.lowercase()
+    val product = Build.PRODUCT.lowercase()
+
+    return fingerprint.contains("generic") ||
+        fingerprint.contains("emulator") ||
+        model.contains("emulator") ||
+        model.contains("android sdk built for x86") ||
+        manufacturer.contains("genymotion") ||
+        (brand.startsWith("generic") && device.startsWith("generic")) ||
+        product == "google_sdk"
 }
 
 @Composable
