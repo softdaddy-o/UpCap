@@ -61,7 +61,7 @@ class PreviewViewModel @Inject constructor(
                 }
                 _saveState.value = SaveState.Success
             } catch (e: Exception) {
-                _saveState.value = SaveState.Error(e.message ?: "저장 실패")
+                _saveState.value = SaveState.Error(e.message ?: "저장에 실패했습니다.")
             }
         }
     }
@@ -79,9 +79,11 @@ class PreviewViewModel @Inject constructor(
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        context.startActivity(Intent.createChooser(intent, "공유").apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
+        context.startActivity(
+            Intent.createChooser(intent, "공유").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        )
     }
 
     sealed class SaveState {

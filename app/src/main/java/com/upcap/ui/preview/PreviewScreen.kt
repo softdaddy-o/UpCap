@@ -81,7 +81,7 @@ fun PreviewScreen(
     LaunchedEffect(saveState) {
         when (saveState) {
             is PreviewViewModel.SaveState.Success -> {
-                snackbarHostState.showSnackbar("갤러리에 저장되었습니다")
+                snackbarHostState.showSnackbar("갤러리에 저장되었습니다.")
             }
             is PreviewViewModel.SaveState.Error -> {
                 snackbarHostState.showSnackbar(
@@ -97,14 +97,17 @@ fun PreviewScreen(
             TopAppBar(
                 title = {
                     Text(
-                        "미리보기",
+                        text = "미리보기",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackHome) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로")
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "뒤로"
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -161,12 +164,12 @@ fun PreviewScreen(
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                                 Text(
-                                    "출력 파일을 찾을 수 없습니다",
+                                    text = "출력 파일을 찾을 수 없습니다.",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
-                                    outputFile.name,
+                                    text = outputFile.name,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -198,14 +201,14 @@ fun PreviewScreen(
                         )
                     } else {
                         Icon(
-                            Icons.Default.SaveAlt,
+                            imageVector = Icons.Default.SaveAlt,
                             contentDescription = null,
                             modifier = Modifier.size(22.dp)
                         )
                     }
                     Spacer(modifier = Modifier.size(10.dp))
                     Text(
-                        "갤러리에 저장",
+                        text = "갤러리에 저장",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -219,13 +222,13 @@ fun PreviewScreen(
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Icon(
-                        Icons.Default.Share,
+                        imageVector = Icons.Default.Share,
                         contentDescription = null,
                         modifier = Modifier.size(22.dp)
                     )
                     Spacer(modifier = Modifier.size(10.dp))
                     Text(
-                        "공유",
+                        text = "공유",
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
