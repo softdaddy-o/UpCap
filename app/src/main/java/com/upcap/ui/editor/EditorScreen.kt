@@ -25,6 +25,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -64,7 +65,7 @@ fun EditorScreen(
             TopAppBar(
                 title = {
                     Text(
-                        "자막 편집",
+                        text = "자막 편집",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -85,7 +86,7 @@ fun EditorScreen(
                             )
                         } else {
                             Text(
-                                "완료",
+                                text = "완료",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary
@@ -121,7 +122,7 @@ fun EditorScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            "편집할 자막을 아래에서 확인하세요",
+                            text = "편집할 자막을 아래에서 확인하세요",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -151,23 +152,17 @@ fun EditorScreen(
                     AssistChip(
                         onClick = { viewModel.splitSegment(selectedIndex) },
                         label = { Text("분할") },
-                        leadingIcon = {
-                            androidx.compose.material3.Icon(Icons.Default.ContentCut, null, Modifier.size(16.dp))
-                        }
+                        leadingIcon = { Icon(Icons.Default.ContentCut, null, Modifier.size(16.dp)) }
                     )
                     AssistChip(
                         onClick = { viewModel.mergeWithNext(selectedIndex) },
                         label = { Text("병합") },
-                        leadingIcon = {
-                            androidx.compose.material3.Icon(Icons.AutoMirrored.Filled.MergeType, null, Modifier.size(16.dp))
-                        }
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.MergeType, null, Modifier.size(16.dp)) }
                     )
                     AssistChip(
                         onClick = { viewModel.deleteSegment(selectedIndex) },
                         label = { Text("삭제") },
-                        leadingIcon = {
-                            androidx.compose.material3.Icon(Icons.Default.Delete, null, Modifier.size(16.dp))
-                        },
+                        leadingIcon = { Icon(Icons.Default.Delete, null, Modifier.size(16.dp)) },
                         colors = AssistChipDefaults.assistChipColors(
                             labelColor = MaterialTheme.colorScheme.error,
                             leadingIconContentColor = MaterialTheme.colorScheme.error
@@ -194,7 +189,7 @@ fun EditorScreen(
                             )
                         ) {
                             Text(
-                                text = "생성된 자막이 없습니다. 기기 음성 인식 서비스가 파일 자막 변환을 지원하지 않거나, 음성을 인식하지 못했습니다.",
+                                text = "생성된 자막이 없습니다. 모델 다운로드 상태를 확인하고, 음성이 분명한 영상으로 다시 시도해 주세요.",
                                 modifier = Modifier.padding(16.dp),
                                 style = MaterialTheme.typography.bodyMedium
                             )
@@ -232,11 +227,7 @@ private fun SubtitleEditCard(
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
             }
         ),
-        border = if (isSelected) {
-            BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
-        } else {
-            null
-        }
+        border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
     ) {
         Column(
             modifier = Modifier.padding(12.dp),

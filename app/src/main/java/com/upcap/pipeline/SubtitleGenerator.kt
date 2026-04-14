@@ -28,7 +28,7 @@ class SubtitleGenerator @Inject constructor(
         try {
             send(SubtitleResult.Progress(0.05f))
 
-            val modelFile = ensureWhisperModel { progress ->
+            val modelFile = ModelAssetManager.getInstance(context).ensureAvailable(AiModelKind.SUBTITLE) { progress ->
                 trySend(SubtitleResult.Progress(0.05f + progress * 0.30f))
             }
 
@@ -64,42 +64,6 @@ class SubtitleGenerator @Inject constructor(
             wavFile.delete()
         }
     }.flowOn(Dispatchers.IO)
-
-    private fun ensureWhisperModel(onProgress: (Float) -> Unit): File {
-        val modelDir = File(context.filesDir, "models").also { it.mkdirs() }
-        val modelFile = File(modelDir, WHISPER_MODEL_FILE)
-        if (modelFile.exists() && modelFile.length() > 1_000_000L) {
-            onProgress(1.0f)
-            return modelFile
-        }
-
-        val connection = URL(WHISPER_MODEL_URL).openConnection() as HttpURLConnection
-        connection.connectTimeout = 30_000
-        connection.readTimeout = 30_000
-        connection.requestMethod = "GET"
-        connection.connect()
-
-        if (connection.responseCode !in 200..299) {
-            throw IllegalStateException("Whisper 모델 다운로드 실패: HTTP ${connection.responseCode}")
-        }
-
-        val totalBytes = connection.contentLengthLong.coerceAtLeast(1L)
-        connection.inputStream.use { input ->
-            FileOutputStream(modelFile).use { output ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                var downloaded = 0L
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    output.write(buffer, 0, read)
-                    downloaded += read
-                    onProgress((downloaded.toFloat() / totalBytes).coerceIn(0f, 1f))
-                }
-            }
-        }
-
-        return modelFile
-    }
 
     private fun estimateSegmentsFromTranscript(transcript: String, durationMs: Long): List<SubtitleSegment> {
         val cleaned = transcript.trim()
@@ -401,8 +365,5 @@ class SubtitleGenerator @Inject constructor(
     companion object {
         private const val PCM_SAMPLE_RATE = 16_000
         private const val WAV_HEADER_SIZE = 44
-        private const val WHISPER_MODEL_FILE = "ggml-tiny.bin"
-        private const val WHISPER_MODEL_URL =
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
     }
 }

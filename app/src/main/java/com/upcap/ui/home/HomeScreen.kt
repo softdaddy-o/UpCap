@@ -27,16 +27,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -62,6 +68,9 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
 import com.upcap.model.ProcessingMode
+import com.upcap.pipeline.AiModelKind
+import com.upcap.pipeline.ModelDownloadStatus
+import com.upcap.pipeline.ModelState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,6 +82,8 @@ fun HomeScreen(
     val videoInfo by viewModel.videoInfo.collectAsState()
     val selectedMode by viewModel.selectedMode.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val qualityModelStatus by viewModel.qualityModelStatus.collectAsState()
+    val subtitleModelStatus by viewModel.subtitleModelStatus.collectAsState()
     val mediaPermission = remember { requiredVideoPermission() }
     val shouldAutoloadTestVideo = remember { shouldAutoloadDebugVideo(context) }
 
@@ -91,9 +102,7 @@ fun HomeScreen(
     }
 
     LaunchedEffect(videoInfo, shouldAutoloadTestVideo, mediaPermission) {
-        if (!shouldAutoloadTestVideo || videoInfo != null) {
-            return@LaunchedEffect
-        }
+        if (!shouldAutoloadTestVideo || videoInfo != null) return@LaunchedEffect
 
         if (mediaPermission == null ||
             ContextCompat.checkSelfPermission(context, mediaPermission) == PackageManager.PERMISSION_GRANTED
@@ -132,7 +141,7 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             Spacer(modifier = Modifier.height(4.dp))
 
@@ -239,6 +248,43 @@ fun HomeScreen(
             }
 
             Text(
+                text = "AI 모델 준비",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+
+            ModelStatusCard(
+                status = qualityModelStatus,
+                icon = Icons.Default.AutoAwesome,
+                description = "화질 개선 분석용 모델"
+            ) {
+                viewModel.clearError()
+                viewModel.downloadModel(AiModelKind.QUALITY)
+            }
+
+            ModelStatusCard(
+                status = subtitleModelStatus,
+                icon = Icons.Default.ClosedCaption,
+                description = "Whisper 자막 인식 모델"
+            ) {
+                viewModel.clearError()
+                viewModel.downloadModel(AiModelKind.SUBTITLE)
+            }
+
+            OutlinedButton(
+                onClick = { viewModel.refreshModelStatuses() },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("모델 상태 다시 확인")
+            }
+
+            Text(
                 text = "처리 모드",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
@@ -289,12 +335,18 @@ fun HomeScreen(
             Button(
                 onClick = {
                     viewModel.clearError()
+                    if (!viewModel.areRequiredModelsReady(selectedMode)) {
+                        viewModel.setError("먼저 필요한 AI 모델을 다운로드해 주세요.")
+                        return@Button
+                    }
                     videoInfo?.let { onStartProcessing(it.uri, selectedMode) }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
-                enabled = videoInfo != null,
+                enabled = videoInfo != null &&
+                    qualityModelStatus.state != ModelState.DOWNLOADING &&
+                    subtitleModelStatus.state != ModelState.DOWNLOADING,
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary
@@ -318,6 +370,91 @@ fun HomeScreen(
     }
 }
 
+@Composable
+private fun ModelStatusCard(
+    status: ModelDownloadStatus,
+    icon: ImageVector,
+    description: String,
+    onDownload: () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = status.kind.label,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                when (status.state) {
+                    ModelState.READY -> Icon(
+                        imageVector = Icons.Default.TaskAlt,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    ModelState.DOWNLOADING -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else -> Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Text(
+                text = when (status.state) {
+                    ModelState.READY -> "준비됨 · ${formatBytes(status.localBytes)}"
+                    ModelState.DOWNLOADING -> "다운로드 중 ${(status.progress * 100).toInt()}% · ${formatBytes(status.localBytes)} / ${status.kind.recommendedSizeLabel}"
+                    ModelState.FAILED -> "다운로드 실패${status.error?.let { " · $it" }.orEmpty()}"
+                    ModelState.NOT_DOWNLOADED -> "미준비 · ${status.kind.recommendedSizeLabel}"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            FilledTonalButton(
+                onClick = onDownload,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = status.state != ModelState.DOWNLOADING
+            ) {
+                Icon(
+                    imageVector = if (status.state == ModelState.READY) Icons.Default.Refresh else Icons.Default.Download,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (status.state == ModelState.READY) "다시 다운로드" else "다운로드")
+            }
+        }
+    }
+}
+
 private fun requiredVideoPermission(): String? =
     when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> Manifest.permission.READ_MEDIA_VIDEO
@@ -327,9 +464,7 @@ private fun requiredVideoPermission(): String? =
 
 private fun shouldAutoloadDebugVideo(context: Context): Boolean {
     val isDebuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-    if (!isDebuggable) {
-        return false
-    }
+    if (!isDebuggable) return false
 
     val fingerprint = Build.FINGERPRINT.lowercase()
     val model = Build.MODEL.lowercase()
@@ -345,6 +480,17 @@ private fun shouldAutoloadDebugVideo(context: Context): Boolean {
         manufacturer.contains("genymotion") ||
         (brand.startsWith("generic") && device.startsWith("generic")) ||
         product == "google_sdk"
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    return when {
+        bytes >= mb -> String.format("%.1f MB", bytes / mb)
+        bytes >= kb -> String.format("%.0f KB", bytes / kb)
+        else -> "$bytes B"
+    }
 }
 
 @Composable

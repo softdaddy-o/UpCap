@@ -63,11 +63,12 @@ class AiQualityPipeline @Inject constructor(
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun analyzeQualityProfile(
+    private suspend fun analyzeQualityProfile(
         inputPath: String,
         onProgress: (Float) -> Unit
     ): QualityProfile {
-        val modelFile = ensureOnnxModel(onProgress)
+            val modelFile = ModelAssetManager.getInstance(context)
+                .ensureAvailable(AiModelKind.QUALITY, onProgress)
         val retriever = MediaMetadataRetriever()
 
         return try {
@@ -336,42 +337,6 @@ class AiQualityPipeline @Inject constructor(
         }
     }
 
-    private fun ensureOnnxModel(onProgress: (Float) -> Unit): File {
-        val modelDir = File(context.filesDir, "models").also { it.mkdirs() }
-        val modelFile = File(modelDir, QUALITY_MODEL_FILE)
-        if (modelFile.exists() && modelFile.length() > 100_000L) {
-            onProgress(1.0f)
-            return modelFile
-        }
-
-        val connection = URL(QUALITY_MODEL_URL).openConnection() as HttpURLConnection
-        connection.connectTimeout = 30_000
-        connection.readTimeout = 30_000
-        connection.requestMethod = "GET"
-        connection.connect()
-
-        if (connection.responseCode !in 200..299) {
-            throw IllegalStateException("AI 화질 모델 다운로드 실패: HTTP ${connection.responseCode}")
-        }
-
-        val totalBytes = connection.contentLengthLong.coerceAtLeast(1L)
-        connection.inputStream.use { input ->
-            FileOutputStream(modelFile).use { output ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                var downloaded = 0L
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    output.write(buffer, 0, read)
-                    downloaded += read
-                    onProgress((downloaded.toFloat() / totalBytes).coerceIn(0f, 1f))
-                }
-            }
-        }
-
-        return modelFile
-    }
-
     private fun copyToLocal(uri: Uri): String {
         val tempFile = File(context.cacheDir, "input_${System.currentTimeMillis()}.mp4")
         context.contentResolver.openInputStream(uri)?.use { input ->
@@ -409,9 +374,6 @@ class AiQualityPipeline @Inject constructor(
         private const val MODEL_INPUT_SIZE = 224
         private const val MODEL_OUTPUT_SIZE = 672
         private const val SCALE_FACTOR = 3
-        private const val QUALITY_MODEL_FILE = "super-resolution-10.onnx"
-        private const val QUALITY_MODEL_URL =
-            "https://huggingface.co/onnxmodelzoo/super-resolution-10/resolve/main/super-resolution-10.onnx"
     }
 }
 

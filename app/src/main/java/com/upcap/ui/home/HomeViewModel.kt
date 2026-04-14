@@ -6,12 +6,17 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
+import com.upcap.pipeline.AiModelKind
+import com.upcap.pipeline.ModelAssetManager
+import com.upcap.pipeline.ModelDownloadStatus
 import com.upcap.model.ProcessingMode
 import com.upcap.model.VideoInfo
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
 import java.io.File
 import javax.inject.Inject
 
@@ -19,6 +24,7 @@ import javax.inject.Inject
 class HomeViewModel @Inject constructor(
     @ApplicationContext private val context: Context
 ) : ViewModel() {
+    private val modelAssetManager = ModelAssetManager.getInstance(context)
 
     private val _videoInfo = MutableStateFlow<VideoInfo?>(null)
     val videoInfo: StateFlow<VideoInfo?> = _videoInfo
@@ -28,6 +34,13 @@ class HomeViewModel @Inject constructor(
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
+
+    val qualityModelStatus: StateFlow<ModelDownloadStatus> = modelAssetManager.qualityStatus
+    val subtitleModelStatus: StateFlow<ModelDownloadStatus> = modelAssetManager.subtitleStatus
+
+    init {
+        modelAssetManager.refreshStatuses()
+    }
 
     fun selectVideo(uri: Uri) {
         try {
@@ -115,6 +128,31 @@ class HomeViewModel @Inject constructor(
 
     fun setError(message: String) {
         _errorMessage.value = message
+    }
+
+    fun refreshModelStatuses() {
+        modelAssetManager.refreshStatuses()
+    }
+
+    fun downloadModel(kind: AiModelKind) {
+        viewModelScope.launch {
+            runCatching {
+                modelAssetManager.download(kind, force = false)
+            }.onFailure {
+                _errorMessage.value = "${kind.label} 다운로드 실패: ${it.message ?: "알 수 없는 오류"}"
+            }
+        }
+    }
+
+    fun areRequiredModelsReady(mode: ProcessingMode): Boolean {
+        return when (mode) {
+            ProcessingMode.QUALITY -> modelAssetManager.isReady(AiModelKind.QUALITY)
+            ProcessingMode.SUBTITLE -> modelAssetManager.isReady(AiModelKind.SUBTITLE)
+            ProcessingMode.BOTH -> {
+                modelAssetManager.isReady(AiModelKind.QUALITY) &&
+                    modelAssetManager.isReady(AiModelKind.SUBTITLE)
+            }
+        }
     }
 
     private fun getFileName(uri: Uri): String {
