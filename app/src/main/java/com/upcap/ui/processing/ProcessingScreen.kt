@@ -18,12 +18,13 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.upcap.model.ProcessingMode
 import com.upcap.model.ProcessingState
+import com.upcap.model.SubtitleSegment
 
 @Composable
 fun ProcessingScreen(
     videoUri: String,
     mode: ProcessingMode,
-    onCompleted: (outputPath: String, hasSubtitles: Boolean) -> Unit,
+    onCompleted: (outputPath: String, subtitles: List<SubtitleSegment>?) -> Unit,
     onCancel: () -> Unit,
     viewModel: ProcessingViewModel = hiltViewModel()
 ) {
@@ -37,8 +38,7 @@ fun ProcessingScreen(
     LaunchedEffect(state) {
         when (val s = state) {
             is ProcessingState.Completed -> {
-                val hasSubtitles = mode == ProcessingMode.SUBTITLE || mode == ProcessingMode.BOTH
-                onCompleted(s.outputPath, hasSubtitles)
+                onCompleted(s.outputPath, s.subtitles)
             }
             is ProcessingState.Cancelled -> onCancel()
             else -> {}

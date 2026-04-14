@@ -8,6 +8,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.upcap.model.ProcessingMode
 import com.upcap.ui.editor.EditorScreen
+import com.upcap.ui.editor.EditorSessionStore
 import com.upcap.ui.home.HomeScreen
 import com.upcap.ui.preview.PreviewScreen
 import com.upcap.ui.processing.ProcessingScreen
@@ -57,9 +58,10 @@ fun UpCapNavGraph(navController: NavHostController) {
             ProcessingScreen(
                 videoUri = encodedUri,
                 mode = mode,
-                onCompleted = { outputPath, hasSubtitles ->
+                onCompleted = { outputPath, subtitles ->
                     val encodedPath = java.net.URLEncoder.encode(outputPath, "UTF-8")
-                    if (hasSubtitles) {
+                    if (!subtitles.isNullOrEmpty()) {
+                        EditorSessionStore.store(outputPath, subtitles)
                         navController.navigate(Routes.editor(encodedPath)) {
                             popUpTo(Routes.HOME)
                         }

@@ -1,6 +1,7 @@
 package com.upcap.ui.editor
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.upcap.model.SubtitleSegment
@@ -30,9 +31,22 @@ class EditorViewModel @Inject constructor(
     private val _videoDurationMs = MutableStateFlow(0L)
     val videoDurationMs: StateFlow<Long> = _videoDurationMs
 
+    private var loadedOutputPath: String? = null
+
     fun loadSubtitles(subtitleList: List<SubtitleSegment>, durationMs: Long) {
         _subtitles.value = subtitleList
         _videoDurationMs.value = durationMs
+    }
+
+    fun loadEditorSession(outputPath: String) {
+        if (loadedOutputPath == outputPath) {
+            return
+        }
+
+        loadedOutputPath = outputPath
+        _subtitles.value = EditorSessionStore.consume(outputPath).orEmpty()
+        _selectedIndex.value = if (_subtitles.value.isEmpty()) -1 else 0
+        _videoDurationMs.value = readDurationMs(outputPath)
     }
 
     fun selectSegment(index: Int) {
@@ -96,16 +110,29 @@ class EditorViewModel @Inject constructor(
     }
 
     fun exportWithSubtitles(videoPath: String, onDone: (String) -> Unit) {
+        android.util.Log.d("UpCap", "exportWithSubtitles called with path: $videoPath")
         viewModelScope.launch {
             _isExporting.value = true
             try {
                 val outputPath = exporter.burnSubtitles(videoPath, _subtitles.value)
+                android.util.Log.d("UpCap", "Export done: $outputPath")
                 onDone(outputPath)
             } catch (e: Exception) {
-                // Handle error
+                android.util.Log.e("UpCap", "Export failed", e)
             } finally {
                 _isExporting.value = false
             }
         }
+    }
+
+    private fun readDurationMs(path: String): Long {
+        return runCatching {
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(path)
+            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+            retriever.release()
+            duration
+        }.getOrDefault(0L)
     }
 }

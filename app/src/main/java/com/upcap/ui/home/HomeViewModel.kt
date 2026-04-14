@@ -104,6 +104,10 @@ class HomeViewModel @Inject constructor(
         _errorMessage.value = null
     }
 
+    fun setError(message: String) {
+        _errorMessage.value = message
+    }
+
     private fun getFileName(uri: Uri): String {
         var name = "video.mp4"
         context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->

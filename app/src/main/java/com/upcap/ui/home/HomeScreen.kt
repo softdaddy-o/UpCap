@@ -49,7 +49,9 @@ fun HomeScreen(
     val selectedMode by viewModel.selectedMode.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val mediaPermission = remember { requiredVideoPermission() }
+    val audioPermission = remember { requiredAudioPermission() }
     val shouldAutoloadTestVideo = remember { shouldAutoloadDebugVideo(context) }
+    var pendingStart by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -66,6 +68,18 @@ fun HomeScreen(
         uri?.let { viewModel.selectVideo(it) }
     }
 
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted && pendingStart) {
+            pendingStart = false
+            videoInfo?.let { onStartProcessing(it.uri, selectedMode) }
+        } else if (!granted) {
+            pendingStart = false
+            viewModel.setError("자막 생성을 위해 마이크 권한이 필요합니다.")
+        }
+    }
+
     // Keep direct shared-storage auto-load as a debug convenience for emulators.
     LaunchedEffect(videoInfo, shouldAutoloadTestVideo, mediaPermission) {
         if (!shouldAutoloadTestVideo || videoInfo != null) {
@@ -79,6 +93,21 @@ fun HomeScreen(
         } else {
             permissionLauncher.launch(mediaPermission)
         }
+    }
+
+    fun startProcessing() {
+        val info = videoInfo ?: return
+        val needsSubtitlePermission = selectedMode == ProcessingMode.SUBTITLE || selectedMode == ProcessingMode.BOTH
+        if (needsSubtitlePermission && audioPermission != null &&
+            ContextCompat.checkSelfPermission(context, audioPermission) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingStart = true
+            audioPermissionLauncher.launch(audioPermission)
+            return
+        }
+
+        pendingStart = false
+        onStartProcessing(info.uri, selectedMode)
     }
 
     Scaffold(
@@ -270,11 +299,7 @@ fun HomeScreen(
 
             // Start button
             Button(
-                onClick = {
-                    videoInfo?.let { info ->
-                        onStartProcessing(info.uri, selectedMode)
-                    }
-                },
+                onClick = { startProcessing() },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
@@ -307,6 +332,13 @@ private fun requiredVideoPermission(): String? =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> Manifest.permission.READ_MEDIA_VIDEO
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> Manifest.permission.READ_EXTERNAL_STORAGE
         else -> null
+    }
+
+private fun requiredAudioPermission(): String? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        Manifest.permission.RECORD_AUDIO
+    } else {
+        null
     }
 
 private fun shouldAutoloadDebugVideo(context: Context): Boolean {

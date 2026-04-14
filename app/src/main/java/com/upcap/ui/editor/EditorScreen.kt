@@ -1,22 +1,46 @@
 package com.upcap.ui.editor
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.automirrored.filled.MergeType
+import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.media3.common.MediaItem
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 import com.upcap.model.SubtitleSegment
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -31,18 +55,8 @@ fun EditorScreen(
     val isExporting by viewModel.isExporting.collectAsState()
     val videoDurationMs by viewModel.videoDurationMs.collectAsState()
 
-    // Load sample subtitles for MVP demo
-    LaunchedEffect(Unit) {
-        if (subtitles.isEmpty()) {
-            viewModel.loadSubtitles(
-                listOf(
-                    SubtitleSegment(0, 0, 3000, "안녕하세요"),
-                    SubtitleSegment(1, 3000, 6000, "UpCap으로 자막을 생성했습니다"),
-                    SubtitleSegment(2, 6000, 10000, "자막을 편집해보세요")
-                ),
-                durationMs = 60000
-            )
-        }
+    LaunchedEffect(outputPath) {
+        viewModel.loadEditorSession(outputPath)
     }
 
     Scaffold(
@@ -90,7 +104,6 @@ fun EditorScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Video preview area
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -108,7 +121,7 @@ fun EditorScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            "미리보기",
+                            "편집할 자막을 아래에서 확인하세요",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -118,7 +131,6 @@ fun EditorScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Timeline
             SubtitleTimeline(
                 subtitles = subtitles,
                 selectedIndex = selectedIndex,
@@ -129,7 +141,6 @@ fun EditorScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Edit toolbar
             if (selectedIndex >= 0 && selectedIndex < subtitles.size) {
                 Row(
                     modifier = Modifier
@@ -141,21 +152,21 @@ fun EditorScreen(
                         onClick = { viewModel.splitSegment(selectedIndex) },
                         label = { Text("분할") },
                         leadingIcon = {
-                            Icon(Icons.Default.ContentCut, null, Modifier.size(16.dp))
+                            androidx.compose.material3.Icon(Icons.Default.ContentCut, null, Modifier.size(16.dp))
                         }
                     )
                     AssistChip(
                         onClick = { viewModel.mergeWithNext(selectedIndex) },
                         label = { Text("병합") },
                         leadingIcon = {
-                            Icon(Icons.Default.MergeType, null, Modifier.size(16.dp))
+                            androidx.compose.material3.Icon(Icons.AutoMirrored.Filled.MergeType, null, Modifier.size(16.dp))
                         }
                     )
                     AssistChip(
                         onClick = { viewModel.deleteSegment(selectedIndex) },
                         label = { Text("삭제") },
                         leadingIcon = {
-                            Icon(Icons.Default.Delete, null, Modifier.size(16.dp))
+                            androidx.compose.material3.Icon(Icons.Default.Delete, null, Modifier.size(16.dp))
                         },
                         colors = AssistChipDefaults.assistChipColors(
                             labelColor = MaterialTheme.colorScheme.error,
@@ -167,7 +178,6 @@ fun EditorScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Subtitle list with edit fields
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -175,13 +185,30 @@ fun EditorScreen(
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                itemsIndexed(subtitles) { index, segment ->
-                    SubtitleEditCard(
-                        segment = segment,
-                        isSelected = index == selectedIndex,
-                        onClick = { viewModel.selectSegment(index) },
-                        onTextChange = { viewModel.updateText(index, it) }
-                    )
+                if (subtitles.isEmpty()) {
+                    item {
+                        Card(
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Text(
+                                text = "생성된 자막이 없습니다. 기기 음성 인식 서비스가 파일 자막 변환을 지원하지 않거나, 음성을 인식하지 못했습니다.",
+                                modifier = Modifier.padding(16.dp),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                } else {
+                    itemsIndexed(subtitles) { index, segment ->
+                        SubtitleEditCard(
+                            segment = segment,
+                            isSelected = index == selectedIndex,
+                            onClick = { viewModel.selectSegment(index) },
+                            onTextChange = { viewModel.updateText(index, it) }
+                        )
+                    }
                 }
             }
         }
@@ -199,24 +226,24 @@ private fun SubtitleEditCard(
         onClick = onClick,
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected)
+            containerColor = if (isSelected) {
                 MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
-            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            }
         ),
         border = if (isSelected) {
-            androidx.compose.foundation.BorderStroke(
-                1.5.dp,
-                MaterialTheme.colorScheme.primary
-            )
-        } else null
+            BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            null
+        }
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Time label
             Text(
-                text = "${formatMs(segment.startMs)} → ${formatMs(segment.endMs)}",
+                text = "${formatMs(segment.startMs)} -> ${formatMs(segment.endMs)}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

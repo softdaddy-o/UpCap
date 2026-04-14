@@ -85,6 +85,8 @@ dependencies {
     // Media3 ExoPlayer
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-ui:1.2.1")
+    implementation("androidx.media3:media3-transformer:1.2.1")
+    implementation("androidx.media3:media3-effect:1.2.1")
 
     // FFmpeg Kit — disabled for MVP build, using MediaCodec directly
     // implementation("com.arthenica:ffmpeg-kit-full:6.0-2")
