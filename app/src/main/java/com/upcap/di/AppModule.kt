@@ -1,8 +1,8 @@
 package com.upcap.di
 
 import android.content.Context
+import com.upcap.pipeline.AiQualityPipeline
 import com.upcap.pipeline.SubtitleGenerator
-import com.upcap.pipeline.UpscaleProcessor
 import com.upcap.pipeline.VideoDecoder
 import com.upcap.pipeline.VideoExporter
 import dagger.Module
@@ -24,8 +24,8 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideUpscaleProcessor(@ApplicationContext context: Context): UpscaleProcessor {
-        return UpscaleProcessor(context)
+    fun provideAiQualityPipeline(@ApplicationContext context: Context): AiQualityPipeline {
+        return AiQualityPipeline(context)
     }
 
     @Provides

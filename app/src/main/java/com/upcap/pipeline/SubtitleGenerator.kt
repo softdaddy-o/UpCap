@@ -1,71 +1,55 @@
 package com.upcap.pipeline
 
 import android.content.Context
-import android.content.Intent
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.ParcelFileDescriptor
-import android.speech.RecognitionListener
-import android.speech.RecognitionPart
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import com.upcap.model.SubtitleSegment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.suspendCancellableCoroutine
+import mx.valdora.whisper.WhisperContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
 import java.nio.ByteBuffer
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 import javax.inject.Inject
 
 class SubtitleGenerator @Inject constructor(
     private val context: Context
 ) {
     fun generate(videoUri: Uri): Flow<SubtitleResult> = channelFlow {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            send(SubtitleResult.Error("파일 자막 인식은 Android 13 이상에서 지원합니다."))
-            return@channelFlow
-        }
-
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            send(SubtitleResult.Error("이 기기에서는 음성 인식 서비스를 사용할 수 없습니다."))
-            return@channelFlow
-        }
-
-        val pcmPath = File(context.cacheDir, "speech_${System.currentTimeMillis()}.pcm")
+        val wavFile = File(context.cacheDir, "whisper_${System.currentTimeMillis()}.wav")
 
         try {
             send(SubtitleResult.Progress(0.05f))
 
+            val modelFile = ensureWhisperModel { progress ->
+                trySend(SubtitleResult.Progress(0.05f + progress * 0.30f))
+            }
+
             val durationMs = readDurationMs(videoUri)
-            val audioPrepared = decodeAudioTrackToMonoPcm(videoUri, pcmPath)
-            if (!audioPrepared) {
-                send(SubtitleResult.Error("영상에서 자막용 오디오를 추출할 수 없습니다."))
+            val hasAudio = decodeAudioTrackToMono16KhzWav(videoUri, wavFile)
+            if (!hasAudio) {
+                send(SubtitleResult.Error("영상에서 음성 트랙을 읽지 못했습니다."))
                 return@channelFlow
             }
 
-            send(SubtitleResult.Progress(0.25f))
+            send(SubtitleResult.Progress(0.45f))
 
-            val subtitles = recognizeSpeechFromFile(
-                pcmPath = pcmPath,
-                durationMs = durationMs,
-                onProgress = { progress ->
-                    trySend(SubtitleResult.Progress(0.25f + progress * 0.65f))
-                }
-            )
+            val transcript = WhisperContext(modelFile.absolutePath).use { whisper ->
+                whisper.transcribe(wavFile)
+            }.trim()
 
+            send(SubtitleResult.Progress(0.85f))
+
+            val subtitles = estimateSegmentsFromTranscript(transcript, durationMs)
             if (subtitles.isEmpty()) {
-                send(SubtitleResult.Error("음성을 인식하지 못했습니다. 또렷한 한국어 음성이 포함된 영상으로 다시 시도해 주세요."))
+                send(SubtitleResult.Error("AI 자막 인식 결과가 비어 있습니다. 음성이 분명한 영상으로 다시 시도해 주세요."))
                 return@channelFlow
             }
 
@@ -75,87 +59,81 @@ class SubtitleGenerator @Inject constructor(
             send(SubtitleResult.Progress(1.0f))
             send(SubtitleResult.Success(subtitles, srtPath))
         } catch (e: Exception) {
-            send(SubtitleResult.Error("자막 생성 실패: ${e.message ?: "알 수 없는 오류"}"))
+            send(SubtitleResult.Error("AI 자막 생성 실패: ${e.message ?: "알 수 없는 오류"}"))
         } finally {
-            pcmPath.delete()
+            wavFile.delete()
         }
     }.flowOn(Dispatchers.IO)
 
-    fun groupWordsIntoSegments(words: List<WordTimestamp>): List<SubtitleSegment> {
-        if (words.isEmpty()) return emptyList()
-
-        val segments = mutableListOf<SubtitleSegment>()
-        val currentWords = mutableListOf<WordTimestamp>()
-        var segmentStart = words.first().startMs
-        var currentLineLength = 0
-        var currentLineCount = 1
-
-        fun flush() {
-            if (currentWords.isEmpty()) return
-            segments += createSegment(segments.size, currentWords.toList())
-            currentWords.clear()
-            currentLineLength = 0
-            currentLineCount = 1
+    private fun ensureWhisperModel(onProgress: (Float) -> Unit): File {
+        val modelDir = File(context.filesDir, "models").also { it.mkdirs() }
+        val modelFile = File(modelDir, WHISPER_MODEL_FILE)
+        if (modelFile.exists() && modelFile.length() > 1_000_000L) {
+            onProgress(1.0f)
+            return modelFile
         }
 
-        for ((index, word) in words.withIndex()) {
-            val cleanedText = word.text.trim()
-            if (cleanedText.isEmpty()) {
-                continue
-            }
+        val connection = URL(WHISPER_MODEL_URL).openConnection() as HttpURLConnection
+        connection.connectTimeout = 30_000
+        connection.readTimeout = 30_000
+        connection.requestMethod = "GET"
+        connection.connect()
 
-            val segmentDuration = word.endMs - segmentStart
-            val projectedLength = currentLineLength + cleanedText.length + if (currentWords.isEmpty()) 0 else 1
-            val punctuationBreak = cleanedText.endsWith(".") ||
-                cleanedText.endsWith("!") ||
-                cleanedText.endsWith("?") ||
-                cleanedText.endsWith("。") ||
-                cleanedText.endsWith("！") ||
-                cleanedText.endsWith("？")
+        if (connection.responseCode !in 200..299) {
+            throw IllegalStateException("Whisper 모델 다운로드 실패: HTTP ${connection.responseCode}")
+        }
 
-            val shouldBreak = currentWords.isNotEmpty() && (
-                segmentDuration > 4_500 ||
-                    (projectedLength > 16 && currentLineCount >= 2)
-                )
-
-            if (shouldBreak) {
-                flush()
-                segmentStart = word.startMs
-            }
-
-            if (projectedLength > 16 && currentWords.isNotEmpty()) {
-                currentLineCount++
-                currentLineLength = 0
-            }
-
-            currentWords += word
-            currentLineLength += cleanedText.length + if (currentWords.size > 1) 1 else 0
-
-            val nextWord = words.getOrNull(index + 1)
-            val longPauseAfter = nextWord != null && (nextWord.startMs - word.endMs) > 600
-            if (punctuationBreak || longPauseAfter) {
-                flush()
-                if (nextWord != null) {
-                    segmentStart = nextWord.startMs
+        val totalBytes = connection.contentLengthLong.coerceAtLeast(1L)
+        connection.inputStream.use { input ->
+            FileOutputStream(modelFile).use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var downloaded = 0L
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    output.write(buffer, 0, read)
+                    downloaded += read
+                    onProgress((downloaded.toFloat() / totalBytes).coerceIn(0f, 1f))
                 }
             }
         }
 
-        flush()
-        return segments
+        return modelFile
     }
 
-    private fun createSegment(id: Int, words: List<WordTimestamp>): SubtitleSegment {
-        val text = words.joinToString(" ") { it.text.trim() }
-            .replace(Regex("\\s+([,.!?])"), "$1")
-            .trim()
-        val lines = wrapText(text, maxCharsPerLine = 16, maxLines = 2)
-        return SubtitleSegment(
-            id = id,
-            startMs = words.first().startMs,
-            endMs = maxOf(words.last().endMs, words.first().startMs + 900),
-            text = lines.joinToString("\n")
-        )
+    private fun estimateSegmentsFromTranscript(transcript: String, durationMs: Long): List<SubtitleSegment> {
+        val cleaned = transcript.trim()
+        if (cleaned.isEmpty()) {
+            return emptyList()
+        }
+
+        val chunks = cleaned.split(Regex("(?<=[.!?])\\s+|\\n+"))
+            .map { it.trim() }
+            .flatMap { wrapText(it, maxCharsPerLine = 16, maxLines = 2) }
+            .filter { it.isNotBlank() }
+            .ifEmpty { listOf(cleaned) }
+
+        val safeDurationMs = durationMs.coerceAtLeast(2_000L)
+        val totalWeight = chunks.sumOf { it.length.coerceAtLeast(1) }
+        var cursorMs = 0L
+
+        return chunks.mapIndexed { index, chunk ->
+            val weight = chunk.length.coerceAtLeast(1)
+            val slice = if (index == chunks.lastIndex) {
+                safeDurationMs - cursorMs
+            } else {
+                (safeDurationMs * weight / totalWeight).coerceAtLeast(1_200L)
+            }
+            val endMs = (cursorMs + slice).coerceAtMost(safeDurationMs)
+            SubtitleSegment(
+                id = index,
+                startMs = cursorMs,
+                endMs = maxOf(endMs, cursorMs + 900),
+                text = chunk
+            ).also {
+                cursorMs = endMs
+            }
+        }
     }
 
     private fun wrapText(text: String, maxCharsPerLine: Int, maxLines: Int): List<String> {
@@ -174,225 +152,11 @@ class SubtitleGenerator @Inject constructor(
             } else {
                 current.append(prefix).append(word)
             }
-
-            if (lines.size == maxLines - 1 && current.length >= maxCharsPerLine) {
-                break
-            }
         }
-
-        if (current.isNotEmpty() && lines.size < maxLines) {
+        if (current.isNotEmpty()) {
             lines += current.toString()
         }
-
         return lines.take(maxLines)
-    }
-
-    private suspend fun recognizeSpeechFromFile(
-        pcmPath: File,
-        durationMs: Long,
-        onProgress: (Float) -> Unit
-    ): List<SubtitleSegment> = suspendCancellableCoroutine { continuation ->
-        val mainHandler = Handler(Looper.getMainLooper())
-        var recognizer: SpeechRecognizer? = null
-        var pfd: ParcelFileDescriptor? = null
-        val latestTimedWords = mutableListOf<WordTimestamp>()
-        var latestTranscript: String? = null
-
-        fun cleanup() {
-            runCatching { recognizer?.cancel() }
-            runCatching { recognizer?.destroy() }
-            runCatching { pfd?.close() }
-            recognizer = null
-            pfd = null
-        }
-
-        fun resolveSubtitles(results: Bundle?): List<SubtitleSegment> {
-            val timedWords = parseTimedWords(results)
-            if (timedWords.isNotEmpty()) {
-                latestTimedWords.clear()
-                latestTimedWords += timedWords
-                return groupWordsIntoSegments(timedWords)
-            }
-
-            val transcript = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                ?.firstOrNull()
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?: latestTranscript
-                ?: return emptyList()
-
-            return estimateSegmentsFromTranscript(transcript, durationMs)
-        }
-
-        val listener = object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                onProgress(0.15f)
-            }
-
-            override fun onBeginningOfSpeech() = Unit
-
-            override fun onRmsChanged(rmsdB: Float) = Unit
-
-            override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-            override fun onEndOfSpeech() {
-                onProgress(0.9f)
-            }
-
-            override fun onError(error: Int) {
-                cleanup()
-                if (continuation.isActive) {
-                    continuation.resumeWithException(IllegalStateException(errorMessage(error)))
-                }
-            }
-
-            override fun onResults(results: Bundle) {
-                latestTranscript = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    ?.trim()
-                val subtitles = resolveSubtitles(results)
-                cleanup()
-                if (continuation.isActive) {
-                    continuation.resume(subtitles)
-                }
-            }
-
-            override fun onPartialResults(partialResults: Bundle) {
-                latestTranscript = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    ?.trim()
-                onProgress(0.6f)
-            }
-
-            override fun onEvent(eventType: Int, params: Bundle?) = Unit
-
-            override fun onSegmentResults(segmentResults: Bundle) {
-                latestTranscript = segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    ?.trim()
-                val timedWords = parseTimedWords(segmentResults)
-                if (timedWords.isNotEmpty()) {
-                    latestTimedWords.clear()
-                    latestTimedWords += timedWords
-                }
-                onProgress(0.75f)
-            }
-
-            override fun onEndOfSegmentedSession() {
-                if (!continuation.isActive) {
-                    cleanup()
-                    return
-                }
-
-                val subtitles = if (latestTimedWords.isNotEmpty()) {
-                    groupWordsIntoSegments(latestTimedWords)
-                } else {
-                    estimateSegmentsFromTranscript(latestTranscript.orEmpty(), durationMs)
-                }
-                cleanup()
-                continuation.resume(subtitles)
-            }
-        }
-
-        continuation.invokeOnCancellation {
-            mainHandler.post { cleanup() }
-        }
-
-        mainHandler.post {
-            try {
-                pfd = ParcelFileDescriptor.open(pcmPath, ParcelFileDescriptor.MODE_READ_ONLY)
-                recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-                recognizer?.setRecognitionListener(listener)
-                recognizer?.startListening(buildRecognizerIntent(pfd!!))
-            } catch (e: Exception) {
-                cleanup()
-                if (continuation.isActive) {
-                    continuation.resumeWithException(e)
-                }
-            }
-        }
-    }
-
-    private fun buildRecognizerIntent(audioSource: ParcelFileDescriptor): Intent {
-        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, audioSource)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, 2)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, 16_000)
-            putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
-            if (Build.VERSION.SDK_INT >= 34) {
-                putExtra(RecognizerIntent.EXTRA_REQUEST_WORD_TIMING, true)
-            }
-        }
-    }
-
-    private fun parseTimedWords(results: Bundle?): List<WordTimestamp> {
-        if (results == null || Build.VERSION.SDK_INT < 34) {
-            return emptyList()
-        }
-
-        val parts = results.getParcelableArrayList(
-            SpeechRecognizer.RECOGNITION_PARTS,
-            RecognitionPart::class.java
-        ).orEmpty()
-
-        if (parts.isEmpty()) {
-            return emptyList()
-        }
-
-        return parts.mapIndexed { index, part ->
-            val startMs = part.timestampMillis
-            val nextStart = parts.getOrNull(index + 1)?.timestampMillis
-            val text = (part.formattedText ?: part.rawText).trim()
-            val endMs = when {
-                nextStart != null && nextStart > startMs -> nextStart
-                else -> startMs + estimateWordDurationMs(text)
-            }
-            WordTimestamp(text = text, startMs = startMs, endMs = endMs)
-        }.filter { it.text.isNotBlank() }
-    }
-
-    private fun estimateSegmentsFromTranscript(transcript: String, durationMs: Long): List<SubtitleSegment> {
-        val cleaned = transcript.trim()
-        if (cleaned.isEmpty()) {
-            return emptyList()
-        }
-
-        val chunks = cleaned.split(Regex("(?<=[.!?])\\s+|\\n+"))
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .ifEmpty { listOf(cleaned) }
-
-        val totalWeight = chunks.sumOf { it.length.coerceAtLeast(1) }
-        var cursorMs = 0L
-
-        return chunks.mapIndexed { index, chunk ->
-            val weight = chunk.length.coerceAtLeast(1)
-            val slice = if (index == chunks.lastIndex) {
-                durationMs - cursorMs
-            } else {
-                (durationMs * weight / totalWeight).coerceAtLeast(1_200L)
-            }
-            val endMs = (cursorMs + slice).coerceAtMost(durationMs)
-            val wrapped = wrapText(chunk, maxCharsPerLine = 16, maxLines = 2).joinToString("\n")
-            SubtitleSegment(
-                id = index,
-                startMs = cursorMs,
-                endMs = maxOf(endMs, cursorMs + 900),
-                text = wrapped
-            ).also {
-                cursorMs = endMs
-            }
-        }
-    }
-
-    private fun estimateWordDurationMs(text: String): Long {
-        val normalizedLength = text.length.coerceIn(1, 6)
-        return (normalizedLength * 180L).coerceIn(240L, 900L)
     }
 
     private fun writeSrtFile(path: String, subtitles: List<SubtitleSegment>) {
@@ -402,10 +166,10 @@ class SubtitleGenerator @Inject constructor(
         File(path).writeText(content)
     }
 
-    private fun decodeAudioTrackToMonoPcm(videoUri: Uri, outputFile: File): Boolean {
+    private fun decodeAudioTrackToMono16KhzWav(videoUri: Uri, outputFile: File): Boolean {
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
-        var output: FileOutputStream? = null
+        var output: RandomAccessFile? = null
 
         return try {
             extractor.setDataSource(context, videoUri, null)
@@ -422,12 +186,15 @@ class SubtitleGenerator @Inject constructor(
             decoder.configure(inputFormat, null, null, 0)
             decoder.start()
 
+            output = RandomAccessFile(outputFile, "rw")
+            output.write(ByteArray(WAV_HEADER_SIZE))
+
             val bufferInfo = MediaCodec.BufferInfo()
             var inputDone = false
             var outputDone = false
             var sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             var channelCount = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-            output = FileOutputStream(outputFile)
+            var pcmBytesWritten = 0L
 
             while (!outputDone) {
                 if (!inputDone) {
@@ -471,17 +238,17 @@ class SubtitleGenerator @Inject constructor(
                             outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
                             val chunk = ByteArray(bufferInfo.size)
                             outputBuffer.get(chunk)
-                            val processedChunk = convertPcmChunkToMono16Khz(
+                            val processed = convertPcmChunkToMono16Khz(
                                 chunk = chunk,
                                 channelCount = channelCount,
                                 inputSampleRate = sampleRate
                             )
-                            output.write(processedChunk)
+                            output.write(processed)
+                            pcmBytesWritten += processed.size
                         }
 
                         outputBuffer?.clear()
                         decoder.releaseOutputBuffer(outputBufferIndex, false)
-
                         if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                             outputDone = true
                         }
@@ -489,8 +256,8 @@ class SubtitleGenerator @Inject constructor(
                 }
             }
 
-            output.flush()
-            outputFile.length() > 0
+            writeWavHeader(output, pcmBytesWritten, PCM_SAMPLE_RATE, 1, 16)
+            pcmBytesWritten > 0
         } catch (_: Exception) {
             false
         } finally {
@@ -506,9 +273,7 @@ class SubtitleGenerator @Inject constructor(
         channelCount: Int,
         inputSampleRate: Int
     ): ByteArray {
-        if (chunk.isEmpty()) {
-            return chunk
-        }
+        if (chunk.isEmpty()) return chunk
 
         val sampleCount = chunk.size / 2
         val pcmSamples = ShortArray(sampleCount)
@@ -518,32 +283,32 @@ class SubtitleGenerator @Inject constructor(
             pcmSamples[i] = ((high shl 8) or low).toShort()
         }
 
-        val monoSamples = if (channelCount <= 1) {
+        val mono = if (channelCount <= 1) {
             pcmSamples
         } else {
-            val mono = ShortArray(pcmSamples.size / channelCount)
-            for (frameIndex in mono.indices) {
-                var sum = 0
-                for (channelIndex in 0 until channelCount) {
-                    sum += pcmSamples[frameIndex * channelCount + channelIndex].toInt()
+            ShortArray(pcmSamples.size / channelCount).also { out ->
+                for (frameIndex in out.indices) {
+                    var sum = 0
+                    for (channelIndex in 0 until channelCount) {
+                        sum += pcmSamples[frameIndex * channelCount + channelIndex].toInt()
+                    }
+                    out[frameIndex] = (sum / channelCount).toShort()
                 }
-                mono[frameIndex] = (sum / channelCount).toShort()
             }
+        }
+
+        val resampled = if (inputSampleRate == PCM_SAMPLE_RATE) {
             mono
-        }
-
-        val resampled = if (inputSampleRate == 16_000) {
-            monoSamples
         } else {
-            resampleShortArray(monoSamples, inputSampleRate, 16_000)
+            resampleShortArray(mono, inputSampleRate, PCM_SAMPLE_RATE)
         }
 
-        val output = ByteArray(resampled.size * 2)
-        for (i in resampled.indices) {
-            output[i * 2] = (resampled[i].toInt() and 0xFF).toByte()
-            output[i * 2 + 1] = ((resampled[i].toInt() shr 8) and 0xFF).toByte()
+        return ByteArray(resampled.size * 2).also { out ->
+            for (i in resampled.indices) {
+                out[i * 2] = (resampled[i].toInt() and 0xFF).toByte()
+                out[i * 2 + 1] = ((resampled[i].toInt() shr 8) and 0xFF).toByte()
+            }
         }
-        return output
     }
 
     private fun resampleShortArray(samples: ShortArray, fromRate: Int, toRate: Int): ShortArray {
@@ -554,7 +319,6 @@ class SubtitleGenerator @Inject constructor(
         val newSize = (samples.size.toDouble() * toRate / fromRate).toInt().coerceAtLeast(1)
         val result = ShortArray(newSize)
         val ratio = fromRate.toDouble() / toRate
-
         for (i in result.indices) {
             val position = i * ratio
             val leftIndex = position.toInt().coerceIn(0, samples.lastIndex)
@@ -564,17 +328,41 @@ class SubtitleGenerator @Inject constructor(
             val right = samples[rightIndex].toDouble()
             result[i] = (left + (right - left) * fraction).toInt().toShort()
         }
-
         return result
+    }
+
+    private fun writeWavHeader(
+        file: RandomAccessFile,
+        totalAudioLen: Long,
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int
+    ) {
+        val byteRate = sampleRate * channels * bitsPerSample / 8
+        val totalDataLen = totalAudioLen + 36
+        file.seek(0)
+        file.writeBytes("RIFF")
+        file.writeInt(Integer.reverseBytes(totalDataLen.toInt()))
+        file.writeBytes("WAVE")
+        file.writeBytes("fmt ")
+        file.writeInt(Integer.reverseBytes(16))
+        file.writeShort(java.lang.Short.reverseBytes(1.toShort()).toInt())
+        file.writeShort(java.lang.Short.reverseBytes(channels.toShort()).toInt())
+        file.writeInt(Integer.reverseBytes(sampleRate))
+        file.writeInt(Integer.reverseBytes(byteRate))
+        file.writeShort(java.lang.Short.reverseBytes((channels * bitsPerSample / 8).toShort()).toInt())
+        file.writeShort(java.lang.Short.reverseBytes(bitsPerSample.toShort()).toInt())
+        file.writeBytes("data")
+        file.writeInt(Integer.reverseBytes(totalAudioLen.toInt()))
     }
 
     private fun readDurationMs(videoUri: Uri): Long {
         val extractor = MediaExtractor()
         return try {
             extractor.setDataSource(context, videoUri, null)
-            val trackIndex = findVideoTrack(extractor)
-            if (trackIndex >= 0) {
-                extractor.getTrackFormat(trackIndex).getLong(MediaFormat.KEY_DURATION) / 1_000
+            val videoTrackIndex = findVideoTrack(extractor)
+            if (videoTrackIndex >= 0) {
+                extractor.getTrackFormat(videoTrackIndex).getLong(MediaFormat.KEY_DURATION) / 1_000
             } else {
                 0L
             }
@@ -588,9 +376,7 @@ class SubtitleGenerator @Inject constructor(
     private fun findAudioTrack(extractor: MediaExtractor): Int {
         for (i in 0 until extractor.trackCount) {
             val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
-            if (mime.startsWith("audio/")) {
-                return i
-            }
+            if (mime.startsWith("audio/")) return i
         }
         return -1
     }
@@ -598,33 +384,10 @@ class SubtitleGenerator @Inject constructor(
     private fun findVideoTrack(extractor: MediaExtractor): Int {
         for (i in 0 until extractor.trackCount) {
             val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
-            if (mime.startsWith("video/")) {
-                return i
-            }
+            if (mime.startsWith("video/")) return i
         }
         return -1
     }
-
-    private fun errorMessage(errorCode: Int): String {
-        return when (errorCode) {
-            SpeechRecognizer.ERROR_AUDIO -> "오디오 입력을 처리하지 못했습니다."
-            SpeechRecognizer.ERROR_CLIENT -> "음성 인식 클라이언트 초기화에 실패했습니다."
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "자막 생성을 위한 권한이 없습니다."
-            SpeechRecognizer.ERROR_NETWORK,
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "음성 인식 서비스 네트워크 연결이 필요합니다."
-            SpeechRecognizer.ERROR_NO_MATCH -> "음성과 일치하는 자막을 찾지 못했습니다."
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "기기의 음성 인식 서비스가 이미 사용 중입니다."
-            SpeechRecognizer.ERROR_SERVER -> "음성 인식 서버 오류가 발생했습니다."
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "음성이 감지되지 않았습니다."
-            else -> "기기 음성 인식 서비스가 자막 생성을 완료하지 못했습니다."
-        }
-    }
-
-    data class WordTimestamp(
-        val text: String,
-        val startMs: Long,
-        val endMs: Long
-    )
 
     sealed class SubtitleResult {
         data class Progress(val value: Float) : SubtitleResult()
@@ -633,5 +396,13 @@ class SubtitleGenerator @Inject constructor(
             val srtPath: String
         ) : SubtitleResult()
         data class Error(val message: String) : SubtitleResult()
+    }
+
+    companion object {
+        private const val PCM_SAMPLE_RATE = 16_000
+        private const val WAV_HEADER_SIZE = 44
+        private const val WHISPER_MODEL_FILE = "ggml-tiny.bin"
+        private const val WHISPER_MODEL_URL =
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
     }
 }

@@ -30,69 +30,78 @@ class HomeViewModel @Inject constructor(
     val errorMessage: StateFlow<String?> = _errorMessage
 
     fun selectVideo(uri: Uri) {
-        android.util.Log.d("UpCap", "selectVideo called with uri: $uri")
         try {
             val retriever = MediaMetadataRetriever()
             retriever.setDataSource(context, uri)
 
-            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?: 0L
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull()
+                ?: 0
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull()
+                ?: 0
             retriever.release()
-
-            val fileName = getFileName(uri)
-            val fileSize = getFileSize(uri)
 
             val info = VideoInfo(
                 uri = uri,
-                fileName = fileName,
+                fileName = getFileName(uri),
                 durationMs = duration,
                 width = width,
                 height = height,
-                sizeBytes = fileSize
+                sizeBytes = getFileSize(uri)
             )
 
             if (info.isTooLong) {
-                _errorMessage.value = "10분 이하 영상만 처리할 수 있습니다"
+                _errorMessage.value = "10분 이하 영상만 처리할 수 있습니다."
                 return
             }
 
             _videoInfo.value = info
             _errorMessage.value = null
-            android.util.Log.d("UpCap", "Video info loaded: ${info.resolution}, ${info.durationFormatted}")
         } catch (e: Exception) {
-            android.util.Log.e("UpCap", "Error loading video", e)
-            _errorMessage.value = "영상 정보를 읽을 수 없습니다: ${e.message}"
+            _errorMessage.value = "영상 정보를 읽지 못했습니다: ${e.message ?: "알 수 없는 오류"}"
         }
     }
 
     fun tryLoadTestVideo() {
-        val testPath = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "test_video.mp4")
-        android.util.Log.d("UpCap", "Checking test video at: ${testPath.absolutePath}, exists=${testPath.exists()}")
-        if (testPath.exists()) {
-            val uri = Uri.fromFile(testPath)
-            try {
-                val retriever = MediaMetadataRetriever()
-                retriever.setDataSource(testPath.absolutePath)
+        val testPath = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+            "test_video.mp4"
+        )
 
-                val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-                val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-                retriever.release()
+        if (!testPath.exists()) {
+            return
+        }
 
-                val info = VideoInfo(
-                    uri = uri,
-                    fileName = testPath.name,
-                    durationMs = duration,
-                    width = width,
-                    height = height,
-                    sizeBytes = testPath.length()
-                )
-                _videoInfo.value = info
-                android.util.Log.d("UpCap", "Test video loaded: ${info.resolution}")
-            } catch (e: Exception) {
-                android.util.Log.e("UpCap", "Failed to load test video", e)
-            }
+        try {
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(testPath.absolutePath)
+
+            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?: 0L
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull()
+                ?: 0
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull()
+                ?: 0
+            retriever.release()
+
+            _videoInfo.value = VideoInfo(
+                uri = Uri.fromFile(testPath),
+                fileName = testPath.name,
+                durationMs = duration,
+                width = width,
+                height = height,
+                sizeBytes = testPath.length()
+            )
+            _errorMessage.value = null
+        } catch (_: Exception) {
+            _errorMessage.value = "테스트 영상을 자동으로 불러오지 못했습니다."
         }
     }
 

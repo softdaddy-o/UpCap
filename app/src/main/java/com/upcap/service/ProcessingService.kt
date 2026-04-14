@@ -9,24 +9,30 @@ import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import com.upcap.R
 import com.upcap.model.ProcessingMode
 import com.upcap.model.ProcessingState
 import com.upcap.model.SubtitleSegment
+import com.upcap.pipeline.AiQualityPipeline
 import com.upcap.pipeline.SubtitleGenerator
-import com.upcap.pipeline.UpscaleProcessor
 import com.upcap.pipeline.VideoExporter
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import java.io.File
 import javax.inject.Inject
 
 @AndroidEntryPoint
 class ProcessingService : Service() {
 
-    @Inject lateinit var upscaleProcessor: UpscaleProcessor
+    @Inject lateinit var aiQualityPipeline: AiQualityPipeline
     @Inject lateinit var subtitleGenerator: SubtitleGenerator
     @Inject lateinit var videoExporter: VideoExporter
 
@@ -71,23 +77,22 @@ class ProcessingService : Service() {
                 var subtitles: List<SubtitleSegment>? = null
                 val outputDir = File(cacheDir, "processing").also { it.mkdirs() }
 
-                // Phase 1: Upscale (if needed)
-                if (mode == ProcessingMode.UPSCALE || mode == ProcessingMode.BOTH) {
-                    upscaleProcessor.upscale(videoUri, outputDir).collect { result ->
+                if (mode == ProcessingMode.QUALITY || mode == ProcessingMode.BOTH) {
+                    aiQualityPipeline.enhance(videoUri, outputDir).collect { result ->
                         when (result) {
-                            is UpscaleProcessor.UpscaleResult.Progress -> {
+                            is AiQualityPipeline.QualityResult.Progress -> {
                                 val overallProgress = if (mode == ProcessingMode.BOTH) {
                                     result.value * 0.7f
                                 } else {
                                     result.value
                                 }
-                                _processingState.value = ProcessingState.Upscaling(overallProgress)
-                                updateNotification("업스케일 중...", (overallProgress * 100).toInt())
+                                _processingState.value = ProcessingState.EnhancingQuality(overallProgress)
+                                updateNotification("AI 화질 개선 중...", (overallProgress * 100).toInt())
                             }
-                            is UpscaleProcessor.UpscaleResult.Success -> {
+                            is AiQualityPipeline.QualityResult.Success -> {
                                 currentVideoPath = result.outputPath
                             }
-                            is UpscaleProcessor.UpscaleResult.Error -> {
+                            is AiQualityPipeline.QualityResult.Error -> {
                                 _processingState.value = ProcessingState.Error(result.message)
                                 stopSelf()
                                 return@collect
@@ -96,7 +101,6 @@ class ProcessingService : Service() {
                     }
                 }
 
-                // Phase 2: Subtitle generation (if needed)
                 if (mode == ProcessingMode.SUBTITLE || mode == ProcessingMode.BOTH) {
                     subtitleGenerator.generate(videoUri).collect { result ->
                         when (result) {
@@ -107,7 +111,7 @@ class ProcessingService : Service() {
                                     result.value * 0.9f
                                 }
                                 _processingState.value = ProcessingState.GeneratingSubtitles(overallProgress)
-                                updateNotification("자막 생성 중...", (overallProgress * 100).toInt())
+                                updateNotification("AI 자막 생성 중...", (overallProgress * 100).toInt())
                             }
                             is SubtitleGenerator.SubtitleResult.Success -> {
                                 subtitles = result.subtitles
@@ -121,9 +125,8 @@ class ProcessingService : Service() {
                     }
                 }
 
-                // Phase 3: Export
                 _processingState.value = ProcessingState.Exporting(0.95f)
-                updateNotification("내보내기 중...", 95)
+                updateNotification("내보내는 중...", 95)
 
                 val finalPath = when {
                     currentVideoPath != null && subtitles != null -> {
@@ -133,24 +136,21 @@ class ProcessingService : Service() {
                         videoExporter.copyVideo(currentVideoPath!!)
                     }
                     subtitles != null -> {
-                        // Subtitle only — burn onto original
                         val tempInput = copyUriToLocal(videoUri)
                         videoExporter.burnSubtitles(tempInput, subtitles!!)
                     }
                     else -> {
-                        _processingState.value = ProcessingState.Error("처리할 내용이 없습니다")
+                        _processingState.value = ProcessingState.Error("처리할 내용이 없습니다.")
                         stopSelf()
                         return@launch
                     }
                 }
 
                 _processingState.value = ProcessingState.Completed(finalPath, subtitles)
-                updateNotification("완료!", 100)
+                updateNotification("완료", 100)
 
-                // Auto-stop after short delay
-                delay(2000)
+                delay(2_000)
                 stopSelf()
-
             } catch (e: CancellationException) {
                 _processingState.value = ProcessingState.Cancelled
                 stopSelf()

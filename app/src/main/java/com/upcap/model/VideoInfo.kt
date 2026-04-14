@@ -25,5 +25,5 @@ data class VideoInfo(
 
     val isTooLong: Boolean get() = durationMs > 10 * 60 * 1000
 
-    val canUpscale: Boolean get() = width <= 1280 && height <= 720
+    val canEnhanceQuality: Boolean get() = width > 0 && height > 0
 }

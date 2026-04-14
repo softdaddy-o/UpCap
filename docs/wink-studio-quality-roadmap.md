@@ -45,6 +45,6 @@ Product behaviors to copy from Wink:
 - Auto captions as a first-class workflow.
 
 Technical notes for this project:
-- The current `UpscaleProcessor` uses Media3 Transformer effects as a fallback enhancement pass only.
+- The current `AiQualityPipeline` applies AI frame analysis first and then encodes with an adaptive enhancement pass.
 - This is not enough for Wink-level restoration quality.
 - ONNX Runtime is already included in the project, so the next implementation step should be model loading, tiled inference, and frame re-encoding.

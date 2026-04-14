@@ -1,14 +1,31 @@
 package com.upcap.ui.processing
 
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
@@ -34,14 +51,11 @@ fun ProcessingScreen(
         viewModel.startProcessing(videoUri, mode)
     }
 
-    // Handle completion
     LaunchedEffect(state) {
-        when (val s = state) {
-            is ProcessingState.Completed -> {
-                onCompleted(s.outputPath, s.subtitles)
-            }
+        when (val current = state) {
+            is ProcessingState.Completed -> onCompleted(current.outputPath, current.subtitles)
             is ProcessingState.Cancelled -> onCancel()
-            else -> {}
+            else -> Unit
         }
     }
 
@@ -52,7 +66,7 @@ fun ProcessingScreen(
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        when (val s = state) {
+        when (val current = state) {
             is ProcessingState.Idle -> {
                 CircularProgressIndicator(
                     modifier = Modifier.size(80.dp),
@@ -66,27 +80,27 @@ fun ProcessingScreen(
                 )
             }
 
-            is ProcessingState.Upscaling -> {
+            is ProcessingState.EnhancingQuality -> {
                 ProgressContent(
-                    progress = s.progress,
-                    title = "영상 업스케일 중",
-                    subtitle = "AI가 해상도를 향상시키고 있습니다"
+                    progress = current.progress,
+                    title = "AI 화질 개선 중",
+                    subtitle = "프레임을 분석해 장면별 보정 프로필을 적용하고 있습니다"
                 )
             }
 
             is ProcessingState.GeneratingSubtitles -> {
                 ProgressContent(
-                    progress = s.progress,
-                    title = "자막 생성 중",
-                    subtitle = "AI가 음성을 인식하고 있습니다"
+                    progress = current.progress,
+                    title = "AI 자막 생성 중",
+                    subtitle = "Whisper 기반 음성 인식으로 자막을 만들고 있습니다"
                 )
             }
 
             is ProcessingState.Exporting -> {
                 ProgressContent(
-                    progress = s.progress,
-                    title = "내보내기 중",
-                    subtitle = "최종 영상을 생성하고 있습니다"
+                    progress = current.progress,
+                    title = "내보내는 중",
+                    subtitle = "최종 파일을 정리하고 있습니다"
                 )
             }
 
@@ -105,7 +119,7 @@ fun ProcessingScreen(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = s.message,
+                    text = current.message,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -121,18 +135,17 @@ fun ProcessingScreen(
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "완료!",
+                    text = "완료",
                     style = MaterialTheme.typography.titleLarge
                 )
             }
 
-            is ProcessingState.Cancelled -> {}
+            is ProcessingState.Cancelled -> Unit
         }
 
         Spacer(modifier = Modifier.height(40.dp))
 
-        // Cancel button (only while processing)
-        if (state is ProcessingState.Upscaling ||
+        if (state is ProcessingState.EnhancingQuality ||
             state is ProcessingState.GeneratingSubtitles ||
             state is ProcessingState.Exporting ||
             state is ProcessingState.Idle
@@ -142,7 +155,6 @@ fun ProcessingScreen(
                     viewModel.cancelProcessing()
                     onCancel()
                 },
-                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
@@ -157,11 +169,9 @@ fun ProcessingScreen(
             }
         }
 
-        // Back button on error
         if (state is ProcessingState.Error) {
             Button(
                 onClick = onCancel,
-                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
@@ -181,7 +191,7 @@ private fun ProgressContent(
     val animatedProgress by animateFloatAsState(
         targetValue = progress,
         animationSpec = tween(300),
-        label = "progress"
+        label = "processing_progress"
     )
 
     Box(contentAlignment = Alignment.Center) {
@@ -193,7 +203,7 @@ private fun ProgressContent(
             trackColor = MaterialTheme.colorScheme.surfaceVariant
         )
         Text(
-            text = "${(progress * 100).toInt()}%",
+            text = "${(animatedProgress * 100).toInt()}%",
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold
         )
@@ -210,6 +220,7 @@ private fun ProgressContent(
     Text(
         text = subtitle,
         style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center
     )
 }

@@ -53,6 +53,9 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 
@@ -93,6 +96,9 @@ dependencies {
 
     // ONNX Runtime
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
+
+    // AI speech recognition
+    implementation("mx.valdora:whisper-android:1.0.0")
 
     // Room
     implementation("androidx.room:room-runtime:2.6.1")

@@ -11,20 +11,47 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ClosedCaption
-import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.VideoFile
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -35,8 +62,6 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
 import com.upcap.model.ProcessingMode
-import com.upcap.ui.theme.GradientEnd
-import com.upcap.ui.theme.GradientStart
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,9 +74,7 @@ fun HomeScreen(
     val selectedMode by viewModel.selectedMode.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val mediaPermission = remember { requiredVideoPermission() }
-    val audioPermission = remember { requiredAudioPermission() }
     val shouldAutoloadTestVideo = remember { shouldAutoloadDebugVideo(context) }
-    var pendingStart by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -64,23 +87,9 @@ fun HomeScreen(
     val videoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        android.util.Log.d("UpCap", "Picker result uri: $uri")
         uri?.let { viewModel.selectVideo(it) }
     }
 
-    val audioPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted && pendingStart) {
-            pendingStart = false
-            videoInfo?.let { onStartProcessing(it.uri, selectedMode) }
-        } else if (!granted) {
-            pendingStart = false
-            viewModel.setError("자막 생성을 위해 마이크 권한이 필요합니다.")
-        }
-    }
-
-    // Keep direct shared-storage auto-load as a debug convenience for emulators.
     LaunchedEffect(videoInfo, shouldAutoloadTestVideo, mediaPermission) {
         if (!shouldAutoloadTestVideo || videoInfo != null) {
             return@LaunchedEffect
@@ -95,33 +104,18 @@ fun HomeScreen(
         }
     }
 
-    fun startProcessing() {
-        val info = videoInfo ?: return
-        val needsSubtitlePermission = selectedMode == ProcessingMode.SUBTITLE || selectedMode == ProcessingMode.BOTH
-        if (needsSubtitlePermission && audioPermission != null &&
-            ContextCompat.checkSelfPermission(context, audioPermission) != PackageManager.PERMISSION_GRANTED
-        ) {
-            pendingStart = true
-            audioPermissionLauncher.launch(audioPermission)
-            return
-        }
-
-        pendingStart = false
-        onStartProcessing(info.uri, selectedMode)
-    }
-
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Column {
                         Text(
-                            "UpCap",
+                            text = "UpCap",
                             style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            "AI 비디오 업스케일 & 자막",
+                            text = "AI 화질 개선 & AI 자막",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -142,9 +136,11 @@ fun HomeScreen(
         ) {
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Video selection card
             Card(
-                onClick = { videoPicker.launch("video/*") },
+                onClick = {
+                    viewModel.clearError()
+                    videoPicker.launch("video/*")
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(if (videoInfo != null) 160.dp else 180.dp),
@@ -161,7 +157,6 @@ fun HomeScreen(
                             .padding(16.dp),
                         horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        // Thumbnail
                         Box(
                             modifier = Modifier
                                 .width(120.dp)
@@ -175,7 +170,6 @@ fun HomeScreen(
                                 modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Crop
                             )
-                            // Duration badge
                             Surface(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
@@ -191,7 +185,6 @@ fun HomeScreen(
                             }
                         }
 
-                        // Info
                         Column(
                             modifier = Modifier
                                 .fillMaxHeight()
@@ -210,16 +203,14 @@ fun HomeScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            // Tap to change hint
                             Text(
-                                text = "탭하여 변경",
+                                text = "탭해서 다른 영상으로 변경",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
                     }
                 } else {
-                    // Empty state
                     Column(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.Center,
@@ -233,13 +224,13 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "영상을 선택해주세요",
+                            text = "영상 파일을 선택해 주세요",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "MP4 · 최대 10분 · 720p 이상",
+                            text = "최대 10분 길이의 영상을 권장합니다",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                         )
@@ -247,7 +238,6 @@ fun HomeScreen(
                 }
             }
 
-            // Mode selection
             Text(
                 text = "처리 모드",
                 style = MaterialTheme.typography.titleMedium,
@@ -256,22 +246,22 @@ fun HomeScreen(
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 ModeCard(
-                    title = "업스케일",
-                    description = "720p → 1080p AI 해상도 향상",
-                    icon = Icons.Default.HighQuality,
-                    isSelected = selectedMode == ProcessingMode.UPSCALE,
-                    onClick = { viewModel.selectMode(ProcessingMode.UPSCALE) }
+                    title = "AI 화질 개선",
+                    description = "AI가 장면을 분석해 밝기, 대비, 색을 자동 보정합니다",
+                    icon = Icons.Default.AutoAwesome,
+                    isSelected = selectedMode == ProcessingMode.QUALITY,
+                    onClick = { viewModel.selectMode(ProcessingMode.QUALITY) }
                 )
                 ModeCard(
-                    title = "자막 생성",
-                    description = "한국어 음성 인식 자동 자막",
+                    title = "AI 자막 생성",
+                    description = "Whisper 기반 음성 인식으로 자막을 만듭니다",
                     icon = Icons.Default.ClosedCaption,
                     isSelected = selectedMode == ProcessingMode.SUBTITLE,
                     onClick = { viewModel.selectMode(ProcessingMode.SUBTITLE) }
                 )
                 ModeCard(
-                    title = "업스케일 + 자막",
-                    description = "해상도 향상 + 자동 자막 동시 적용",
+                    title = "AI 화질 개선 + AI 자막",
+                    description = "영상 보정과 자막 생성을 한 번에 처리합니다",
                     icon = Icons.Default.Movie,
                     isSelected = selectedMode == ProcessingMode.BOTH,
                     onClick = { viewModel.selectMode(ProcessingMode.BOTH) }
@@ -280,8 +270,7 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            // Error message
-            errorMessage?.let { msg ->
+            errorMessage?.let { message ->
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer
@@ -289,7 +278,7 @@ fun HomeScreen(
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Text(
-                        text = msg,
+                        text = message,
                         modifier = Modifier.padding(16.dp),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onErrorContainer
@@ -297,9 +286,11 @@ fun HomeScreen(
                 }
             }
 
-            // Start button
             Button(
-                onClick = { startProcessing() },
+                onClick = {
+                    viewModel.clearError()
+                    videoInfo?.let { onStartProcessing(it.uri, selectedMode) }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
@@ -332,13 +323,6 @@ private fun requiredVideoPermission(): String? =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> Manifest.permission.READ_MEDIA_VIDEO
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> Manifest.permission.READ_EXTERNAL_STORAGE
         else -> null
-    }
-
-private fun requiredAudioPermission(): String? =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-        Manifest.permission.RECORD_AUDIO
-    } else {
-        null
     }
 
 private fun shouldAutoloadDebugVideo(context: Context): Boolean {
@@ -418,11 +402,7 @@ private fun ModeCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            if (isSelected) {
-                RadioButton(selected = true, onClick = null)
-            } else {
-                RadioButton(selected = false, onClick = null)
-            }
+            RadioButton(selected = isSelected, onClick = null)
         }
     }
 }
