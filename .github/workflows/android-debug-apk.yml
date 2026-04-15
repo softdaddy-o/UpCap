@@ -7,6 +7,9 @@ on:
       - master
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   build-debug-apk:
     runs-on: ubuntu-latest
@@ -28,9 +31,33 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
-      - name: Upload debug APK
+      - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: upcap-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Recreate rolling latest release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete debug-apk-latest --repo "${{ github.repository }}" --yes || true
+          git push --delete origin debug-apk-latest || true
+          gh release create debug-apk-latest \
+            app/build/outputs/apk/debug/app-debug.apk#app-debug.apk \
+            --repo "${{ github.repository }}" \
+            --title "Latest Debug APK" \
+            --notes "Latest debug APK for commit ${{ github.sha }}" \
+            --prerelease
+
+      - name: Write release links
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "## APK"
+            echo
+            echo "- Release page: https://github.com/${{ github.repository }}/releases/tag/debug-apk-latest"
+            echo "- Direct download: https://github.com/${{ github.repository }}/releases/download/debug-apk-latest/app-debug.apk"
+          } >> "$GITHUB_STEP_SUMMARY"
