@@ -3,6 +3,7 @@ package com.upcap.pipeline
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
@@ -26,9 +27,6 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.nio.FloatBuffer
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -67,8 +65,8 @@ class AiQualityPipeline @Inject constructor(
         inputPath: String,
         onProgress: (Float) -> Unit
     ): QualityProfile {
-            val modelFile = ModelAssetManager.getInstance(context)
-                .ensureAvailable(AiModelKind.QUALITY, onProgress)
+        val modelFile = ModelAssetManager.getInstance(context)
+            .ensureAvailable(AiModelKind.QUALITY, onProgress)
         val retriever = MediaMetadataRetriever()
 
         return try {
@@ -152,19 +150,30 @@ class AiQualityPipeline @Inject constructor(
             val meanSaturation = saturationSum / pixels.size
             val contrast = standardDeviation(yChannel, meanBrightness)
 
-            val inputBuffer = FloatBuffer.allocate(MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
-            inputBuffer.put(yChannel)
+            val inputBuffer = FloatBuffer.allocate(MODEL_CHANNELS * MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
+            putRgbNchw(inputBuffer, pixels)
             inputBuffer.rewind()
 
             val inputName = session.inputNames.first()
-            OnnxTensor.createTensor(environment, inputBuffer, longArrayOf(1, 1, MODEL_INPUT_SIZE.toLong(), MODEL_INPUT_SIZE.toLong())).use { tensor ->
+            OnnxTensor.createTensor(
+                environment,
+                inputBuffer,
+                longArrayOf(
+                    1,
+                    MODEL_CHANNELS.toLong(),
+                    MODEL_INPUT_SIZE.toLong(),
+                    MODEL_INPUT_SIZE.toLong()
+                )
+            ).use { tensor ->
                 session.run(mapOf(inputName to tensor)).use { result ->
                     val output = result.get(0) as? OnnxTensor
                         ?: throw IllegalStateException("AI 모델 출력이 비어 있습니다.")
                     output.use {
-                        val enhanced = FloatArray(MODEL_OUTPUT_SIZE * MODEL_OUTPUT_SIZE)
-                        output.floatBuffer.get(enhanced)
-                        val detailGain = calculateDetailGain(yChannel, enhanced)
+                        val outputBuffer = output.floatBuffer
+                        val enhanced = FloatArray(outputBuffer.remaining())
+                        outputBuffer.get(enhanced)
+                        val outputShape = (output.info as? TensorInfo)?.shape
+                        val detailGain = calculateDetailGain(yChannel, enhanced, outputShape)
                         FrameMetrics(
                             brightness = meanBrightness,
                             contrast = contrast,
@@ -177,16 +186,32 @@ class AiQualityPipeline @Inject constructor(
         }
     }
 
+    private fun putRgbNchw(buffer: FloatBuffer, pixels: IntArray) {
+        for (channel in 0 until MODEL_CHANNELS) {
+            for (color in pixels) {
+                val value = when (channel) {
+                    0 -> (color shr 16) and 0xFF
+                    1 -> (color shr 8) and 0xFF
+                    else -> color and 0xFF
+                }
+                buffer.put(value / 255f)
+            }
+        }
+    }
+
     private fun calculateDetailGain(
         inputY: FloatArray,
-        enhancedY: FloatArray
+        enhanced: FloatArray,
+        outputShape: LongArray?
     ): Float {
+        val layout = OutputLayout.from(outputShape, enhanced.size)
         var differenceSum = 0f
         for (y in 0 until MODEL_INPUT_SIZE) {
-            val enhancedYRow = (y * SCALE_FACTOR + 1) * MODEL_OUTPUT_SIZE
             val inputRow = y * MODEL_INPUT_SIZE
             for (x in 0 until MODEL_INPUT_SIZE) {
-                val enhancedValue = enhancedY[enhancedYRow + (x * SCALE_FACTOR + 1)].coerceIn(0f, 1f)
+                val sampleX = (x * layout.width / MODEL_INPUT_SIZE).coerceIn(0, layout.width - 1)
+                val sampleY = (y * layout.height / MODEL_INPUT_SIZE).coerceIn(0, layout.height - 1)
+                val enhancedValue = layout.lumaAt(enhanced, sampleX, sampleY)
                 differenceSum += kotlin.math.abs(enhancedValue - inputY[inputRow + x])
             }
         }
@@ -200,35 +225,35 @@ class AiQualityPipeline @Inject constructor(
         val averageDetailGain = metrics.map { it.detailGain }.average().toFloat()
 
         val brightnessLift = when {
-            averageBrightness < 0.30f -> 8f
-            averageBrightness < 0.40f -> 5f
-            averageBrightness < 0.48f -> 2.5f
-            else -> 1f
+            averageBrightness < 0.30f -> 4.5f
+            averageBrightness < 0.40f -> 3f
+            averageBrightness < 0.48f -> 1.5f
+            else -> 0.4f
         }
 
         val saturationBoost = when {
-            averageSaturation < 0.14f -> 18f
-            averageSaturation < 0.22f -> 12f
-            averageSaturation < 0.30f -> 8f
-            else -> 4f
+            averageSaturation < 0.14f -> 7f
+            averageSaturation < 0.22f -> 5f
+            averageSaturation < 0.30f -> 3f
+            else -> 1.5f
         }
 
         val contrastBoost = when {
-            averageContrast < 0.10f -> 0.18f
-            averageContrast < 0.15f -> 0.14f
-            averageContrast < 0.20f -> 0.10f
-            else -> 0.08f
-        } + ((0.08f - averageDetailGain).coerceAtLeast(0f) * 0.8f)
+            averageContrast < 0.10f -> 0.10f
+            averageContrast < 0.15f -> 0.08f
+            averageContrast < 0.20f -> 0.06f
+            else -> 0.04f
+        } + ((0.06f - averageDetailGain).coerceAtLeast(0f) * 0.35f)
 
-        val shadowBlueBias = if (averageBrightness < 0.36f) 1.03f else 1.015f
-        val warmthRecovery = if (averageSaturation < 0.18f) 1.02f else 1.01f
+        val shadowBlueBias = if (averageBrightness < 0.36f) 1.012f else 1.005f
+        val warmthRecovery = if (averageSaturation < 0.18f) 1.012f else 1.006f
 
         return QualityProfile(
             lightnessBoost = brightnessLift,
             saturationBoost = saturationBoost,
-            contrastBoost = contrastBoost.coerceIn(0.08f, 0.22f),
+            contrastBoost = contrastBoost.coerceIn(0.03f, 0.12f),
             redScale = warmthRecovery,
-            greenScale = 1.01f,
+            greenScale = 1.004f,
             blueScale = shadowBlueBias,
             sceneLabel = when {
                 averageBrightness < 0.34f -> "low_light"
@@ -371,9 +396,77 @@ class AiQualityPipeline @Inject constructor(
     )
 
     companion object {
-        private const val MODEL_INPUT_SIZE = 224
-        private const val MODEL_OUTPUT_SIZE = 672
-        private const val SCALE_FACTOR = 3
+        private const val MODEL_CHANNELS = 3
+        private const val MODEL_INPUT_SIZE = 128
+    }
+}
+
+private data class OutputLayout(
+    val width: Int,
+    val height: Int,
+    val channels: Int,
+    val channelFirst: Boolean
+) {
+    fun lumaAt(values: FloatArray, x: Int, y: Int): Float {
+        if (channels == 1) {
+            return values[(y * width + x).coerceIn(values.indices)].coerceIn(0f, 1f)
+        }
+
+        val r = sample(values, 0, x, y)
+        val g = sample(values, 1, x, y)
+        val b = sample(values, 2, x, y)
+        return ((0.299f * r) + (0.587f * g) + (0.114f * b)).coerceIn(0f, 1f)
+    }
+
+    private fun sample(values: FloatArray, channel: Int, x: Int, y: Int): Float {
+        val index = if (channelFirst) {
+            channel * width * height + y * width + x
+        } else {
+            (y * width + x) * channels + channel
+        }
+        return values[index.coerceIn(values.indices)].coerceIn(0f, 1f)
+    }
+
+    companion object {
+        fun from(shape: LongArray?, valueCount: Int): OutputLayout {
+            if (shape != null && shape.size >= 4) {
+                val dims = shape.map { if (it > 0) it.toInt() else 0 }
+                if (dims[1] in 1..4 && dims[2] > 0 && dims[3] > 0) {
+                    return OutputLayout(
+                        width = dims[3],
+                        height = dims[2],
+                        channels = dims[1],
+                        channelFirst = true
+                    )
+                }
+                if (dims[3] in 1..4 && dims[1] > 0 && dims[2] > 0) {
+                    return OutputLayout(
+                        width = dims[2],
+                        height = dims[1],
+                        channels = dims[3],
+                        channelFirst = false
+                    )
+                }
+            }
+
+            val singleChannelSize = kotlin.math.sqrt(valueCount.toDouble()).toInt().coerceAtLeast(1)
+            val threeChannelSize = kotlin.math.sqrt((valueCount / 3.0)).toInt().coerceAtLeast(1)
+            return if (threeChannelSize * threeChannelSize * 3 == valueCount) {
+                OutputLayout(
+                    width = threeChannelSize,
+                    height = threeChannelSize,
+                    channels = 3,
+                    channelFirst = true
+                )
+            } else {
+                OutputLayout(
+                    width = singleChannelSize,
+                    height = singleChannelSize,
+                    channels = 1,
+                    channelFirst = true
+                )
+            }
+        }
     }
 }
 

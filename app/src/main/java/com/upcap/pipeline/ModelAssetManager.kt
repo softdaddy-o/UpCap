@@ -196,10 +196,10 @@ enum class AiModelKind(
 ) {
     QUALITY(
         label = "AI 화질 모델",
-        fileName = "super-resolution-10.onnx",
-        url = "https://huggingface.co/onnxmodelzoo/super-resolution-10/resolve/main/super-resolution-10.onnx",
-        minimumBytes = 100_000L,
-        recommendedSizeLabel = "약 240 KB"
+        fileName = "Real-ESRGAN-x4plus.onnx",
+        url = "https://huggingface.co/qualcomm/Real-ESRGAN-x4plus/resolve/f9a79a7a689895b092abed0dc48ac5b21d208e92/Real-ESRGAN-x4plus.onnx?download=true",
+        minimumBytes = 60_000_000L,
+        recommendedSizeLabel = "약 64 MB"
     ),
     SUBTITLE(
         label = "AI 자막 모델",

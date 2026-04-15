@@ -23,7 +23,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ClosedCaption
@@ -113,6 +115,16 @@ fun HomeScreen(
         }
     }
 
+    val allModelsReady = qualityModelStatus.state == ModelState.READY &&
+        subtitleModelStatus.state == ModelState.READY
+    val requiredModelsReady = when (selectedMode) {
+        ProcessingMode.QUALITY -> qualityModelStatus.state == ModelState.READY
+        ProcessingMode.SUBTITLE -> subtitleModelStatus.state == ModelState.READY
+        ProcessingMode.BOTH -> allModelsReady
+    }
+    val anyModelDownloading = qualityModelStatus.state == ModelState.DOWNLOADING ||
+        subtitleModelStatus.state == ModelState.DOWNLOADING
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -134,13 +146,83 @@ fun HomeScreen(
                     containerColor = MaterialTheme.colorScheme.background
                 )
             )
+        },
+        bottomBar = {
+            Surface(
+                tonalElevation = 3.dp,
+                shadowElevation = 10.dp,
+                color = MaterialTheme.colorScheme.background
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    errorMessage?.let { message ->
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = message,
+                                modifier = Modifier.padding(12.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+
+                    if (videoInfo != null && !requiredModelsReady) {
+                        Text(
+                            text = "선택한 처리 모드에 필요한 AI 모델을 먼저 준비해야 합니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            viewModel.clearError()
+                            if (!requiredModelsReady) {
+                                viewModel.setError("선택한 처리 모드에 필요한 AI 모델을 다운로드해 주세요.")
+                                return@Button
+                            }
+                            videoInfo?.let { onStartProcessing(it.uri, selectedMode) }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        enabled = videoInfo != null && !anyModelDownloading,
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayCircle,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (videoInfo == null) "먼저 영상 선택" else "변환 시작",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
         }
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 20.dp),
+                .padding(horizontal = 20.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             Spacer(modifier = Modifier.height(4.dp))
@@ -247,41 +329,48 @@ fun HomeScreen(
                 }
             }
 
-            Text(
-                text = "AI 모델 준비",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-
-            ModelStatusCard(
-                status = qualityModelStatus,
-                icon = Icons.Default.AutoAwesome,
-                description = "화질 개선 분석용 모델"
-            ) {
-                viewModel.clearError()
-                viewModel.downloadModel(AiModelKind.QUALITY)
-            }
-
-            ModelStatusCard(
-                status = subtitleModelStatus,
-                icon = Icons.Default.ClosedCaption,
-                description = "Whisper 자막 인식 모델"
-            ) {
-                viewModel.clearError()
-                viewModel.downloadModel(AiModelKind.SUBTITLE)
-            }
-
-            OutlinedButton(
-                onClick = { viewModel.refreshModelStatuses() },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
+            if (!allModelsReady) {
+                Text(
+                    text = "AI 모델 준비",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("모델 상태 다시 확인")
+
+                ModelStatusCard(
+                    status = qualityModelStatus,
+                    icon = Icons.Default.AutoAwesome,
+                    description = "Real-ESRGAN 기반 고품질 영상 분석 모델"
+                ) {
+                    viewModel.clearError()
+                    viewModel.downloadModel(AiModelKind.QUALITY)
+                }
+
+                ModelStatusCard(
+                    status = subtitleModelStatus,
+                    icon = Icons.Default.ClosedCaption,
+                    description = "Whisper 기반 AI 자막 인식 모델"
+                ) {
+                    viewModel.clearError()
+                    viewModel.downloadModel(AiModelKind.SUBTITLE)
+                }
+
+                OutlinedButton(
+                    onClick = { viewModel.refreshModelStatuses() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("모델 상태 다시 확인")
+                }
+            } else {
+                ModelReadySummary(
+                    qualityModelStatus = qualityModelStatus,
+                    subtitleModelStatus = subtitleModelStatus
+                )
             }
 
             Text(
@@ -314,58 +403,73 @@ fun HomeScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.weight(1f))
-
-            errorMessage?.let { message ->
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    ),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text(
-                        text = message,
-                        modifier = Modifier.padding(16.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                }
-            }
-
-            Button(
-                onClick = {
-                    viewModel.clearError()
-                    if (!viewModel.areRequiredModelsReady(selectedMode)) {
-                        viewModel.setError("먼저 필요한 AI 모델을 다운로드해 주세요.")
-                        return@Button
-                    }
-                    videoInfo?.let { onStartProcessing(it.uri, selectedMode) }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                enabled = videoInfo != null &&
-                    qualityModelStatus.state != ModelState.DOWNLOADING &&
-                    subtitleModelStatus.state != ModelState.DOWNLOADING,
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary
-                )
-            ) {
-                Icon(
-                    imageVector = Icons.Default.PlayCircle,
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
+            if (allModelsReady) {
                 Text(
-                    text = "시작",
+                    text = "모델 관리",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold
                 )
+
+                ModelStatusCard(
+                    status = qualityModelStatus,
+                    icon = Icons.Default.AutoAwesome,
+                    description = "Real-ESRGAN 기반 고품질 영상 분석 모델"
+                ) {
+                    viewModel.clearError()
+                    viewModel.downloadModel(AiModelKind.QUALITY)
+                }
+
+                ModelStatusCard(
+                    status = subtitleModelStatus,
+                    icon = Icons.Default.ClosedCaption,
+                    description = "Whisper 기반 AI 자막 인식 모델"
+                ) {
+                    viewModel.clearError()
+                    viewModel.downloadModel(AiModelKind.SUBTITLE)
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun ModelReadySummary(
+    qualityModelStatus: ModelDownloadStatus,
+    subtitleModelStatus: ModelDownloadStatus
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.TaskAlt,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "AI 모델 준비 완료",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "화질 ${formatBytes(qualityModelStatus.localBytes)} · 자막 ${formatBytes(subtitleModelStatus.localBytes)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
