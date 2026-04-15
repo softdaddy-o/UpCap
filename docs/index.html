@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>UpCap 테스트 앱 설치</title>
+    <style>
+      :root {
+        --ink: #101827;
+        --muted: #596579;
+        --paper: #f8faf7;
+        --card: rgba(255, 255, 255, 0.86);
+        --line: rgba(16, 24, 39, 0.12);
+        --accent: #0f766e;
+        --accent-2: #f59e0b;
+        --accent-dark: #134e4a;
+        --danger: #b42318;
+        --shadow: 0 24px 80px rgba(19, 78, 74, 0.18);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-height: 100%;
+        background:
+          radial-gradient(circle at 8% 10%, rgba(20, 184, 166, 0.24), transparent 30rem),
+          radial-gradient(circle at 92% 6%, rgba(245, 158, 11, 0.18), transparent 24rem),
+          linear-gradient(145deg, #f8faf7 0%, #edf7f4 48%, #fff7ed 100%);
+      }
+
+      body {
+        margin: 0;
+        min-height: 100%;
+        color: var(--ink);
+        font-family: "Aptos", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+        line-height: 1.6;
+      }
+
+      main {
+        width: min(100%, 980px);
+        margin: 0 auto;
+        padding: 28px 18px 48px;
+      }
+
+      .shell {
+        display: grid;
+        gap: 18px;
+      }
+
+      .hero,
+      .card {
+        border: 1px solid var(--line);
+        background: var(--card);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+        border-radius: 30px;
+      }
+
+      .hero {
+        position: relative;
+        overflow: hidden;
+        padding: 28px;
+      }
+
+      .hero::after {
+        position: absolute;
+        right: -64px;
+        top: -70px;
+        width: 190px;
+        height: 190px;
+        content: "";
+        border-radius: 999px;
+        background: conic-gradient(from 180deg, rgba(15, 118, 110, 0.2), rgba(245, 158, 11, 0.28), transparent);
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 32px;
+        padding: 5px 12px;
+        border: 1px solid rgba(15, 118, 110, 0.22);
+        border-radius: 999px;
+        color: var(--accent-dark);
+        background: rgba(240, 253, 250, 0.8);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      h1 {
+        max-width: 690px;
+        margin: 18px 0 10px;
+        font-size: clamp(34px, 8vw, 68px);
+        line-height: 0.96;
+        letter-spacing: -0.06em;
+      }
+
+      .lead {
+        max-width: 660px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 18px;
+      }
+
+      .actions {
+        display: grid;
+        gap: 12px;
+        margin-top: 26px;
+      }
+
+      .button {
+        display: inline-flex;
+        min-height: 56px;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        border-radius: 18px;
+        padding: 14px 18px;
+        color: white;
+        background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+        box-shadow: 0 16px 36px rgba(15, 118, 110, 0.28);
+        text-decoration: none;
+        font-size: 18px;
+        font-weight: 800;
+        transition: transform 180ms ease, box-shadow 180ms ease;
+      }
+
+      .button:hover,
+      .button:focus-visible {
+        transform: translateY(-1px);
+        box-shadow: 0 20px 44px rgba(15, 118, 110, 0.34);
+      }
+
+      .button.secondary {
+        color: var(--accent-dark);
+        background: rgba(255, 255, 255, 0.78);
+        border: 1px solid rgba(15, 118, 110, 0.2);
+        box-shadow: none;
+        font-size: 16px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+      }
+
+      .card {
+        padding: 22px;
+      }
+
+      .card h2 {
+        margin: 0 0 12px;
+        font-size: 22px;
+        letter-spacing: -0.03em;
+      }
+
+      .steps {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: 34px 1fr;
+        gap: 12px;
+        align-items: start;
+      }
+
+      .num {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border-radius: 12px;
+        color: white;
+        background: var(--accent);
+        font-weight: 800;
+      }
+
+      .step strong {
+        display: block;
+        margin-bottom: 2px;
+      }
+
+      .step span,
+      .note,
+      .meta {
+        color: var(--muted);
+      }
+
+      .warning {
+        border-color: rgba(180, 35, 24, 0.22);
+        background: rgba(255, 251, 250, 0.88);
+      }
+
+      .warning h2 {
+        color: var(--danger);
+      }
+
+      .qr {
+        display: grid;
+        justify-items: center;
+        gap: 12px;
+        text-align: center;
+      }
+
+      .qr img {
+        width: 184px;
+        height: 184px;
+        border: 10px solid white;
+        border-radius: 22px;
+        box-shadow: 0 12px 40px rgba(16, 24, 39, 0.16);
+      }
+
+      code {
+        padding: 2px 6px;
+        border-radius: 8px;
+        color: var(--accent-dark);
+        background: rgba(15, 118, 110, 0.08);
+        font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+      }
+
+      @media (min-width: 780px) {
+        main {
+          padding: 48px 28px 72px;
+        }
+
+        .hero {
+          padding: 42px;
+        }
+
+        .actions {
+          grid-template-columns: minmax(240px, 320px) minmax(180px, 240px);
+          align-items: center;
+        }
+
+        .grid {
+          grid-template-columns: 1.25fr 0.75fr;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .button {
+          transition: none;
+        }
+
+        .button:hover,
+        .button:focus-visible {
+          transform: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="shell">
+        <section class="hero" aria-labelledby="title">
+          <div class="eyebrow">UpCap Android 테스트 빌드</div>
+          <h1 id="title">휴대폰에서 바로 설치하고 확인하세요.</h1>
+          <p class="lead">
+            이 페이지는 항상 최신 debug APK로 연결됩니다. 개발 PC에 휴대폰을 연결하지 않아도
+            링크를 열어 설치하고 모델 다운로드 상태를 확인할 수 있습니다.
+          </p>
+          <div class="actions">
+            <a class="button" href="https://github.com/softdaddy-o/UpCap/releases/download/debug-apk-latest/app-debug.apk">
+              최신 APK 다운로드
+            </a>
+            <a class="button secondary" href="https://github.com/softdaddy-o/UpCap/releases/tag/debug-apk-latest">
+              릴리스 페이지 보기
+            </a>
+          </div>
+        </section>
+
+        <section class="grid" aria-label="설치 안내">
+          <article class="card">
+            <h2>설치 순서</h2>
+            <ol class="steps">
+              <li class="step">
+                <span class="num">1</span>
+                <span><strong>최신 APK 다운로드</strong>위 버튼을 눌러 <code>app-debug.apk</code>를 받습니다.</span>
+              </li>
+              <li class="step">
+                <span class="num">2</span>
+                <span><strong>알 수 없는 앱 설치 허용</strong>브라우저 또는 파일 앱에 설치 권한을 허용합니다.</span>
+              </li>
+              <li class="step">
+                <span class="num">3</span>
+                <span><strong>앱 실행 후 모델 다운로드</strong>홈 화면의 <code>AI 모델 준비</code>에서 두 모델이 <code>준비됨</code>이 되는지 확인합니다.</span>
+              </li>
+              <li class="step">
+                <span class="num">4</span>
+                <span><strong>짧은 영상으로 먼저 테스트</strong>자막 생성과 화질 개선을 각각 10초 안팎 영상으로 확인합니다.</span>
+              </li>
+            </ol>
+          </article>
+
+          <aside class="card qr">
+            <h2>PC에서 보는 중이면</h2>
+            <img
+              src="https://quickchart.io/qr?size=220&margin=1&text=https%3A%2F%2Fsoftdaddy-o.github.io%2FUpCap%2F"
+              alt="UpCap 설치 페이지 QR 코드"
+            />
+            <p class="note">휴대폰 카메라로 QR을 스캔하면 이 설치 페이지가 열립니다.</p>
+          </aside>
+        </section>
+
+        <section class="card warning">
+          <h2>테스트 전 확인할 점</h2>
+          <p class="meta">
+            이 APK는 debug 빌드입니다. 처음 실행할 때 모델 다운로드가 필요하며, 네트워크 상태에 따라
+            시간이 걸릴 수 있습니다. 앱 안에서 모델 상태가 <code>준비됨</code>으로 표시되기 전에는
+            처리 시작이 막히도록 되어 있습니다.
+          </p>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>
