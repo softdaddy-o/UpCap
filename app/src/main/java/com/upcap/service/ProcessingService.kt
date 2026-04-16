@@ -61,7 +61,7 @@ class ProcessingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val videoUriStr = intent?.getStringExtra(EXTRA_VIDEO_URI) ?: return START_NOT_STICKY
         val modeName = intent.getStringExtra(EXTRA_MODE) ?: return START_NOT_STICKY
-        val mode = ProcessingMode.valueOf(modeName)
+        val mode = ProcessingMode.entries.firstOrNull { it.name == modeName } ?: return START_NOT_STICKY
         val videoUri = Uri.parse(videoUriStr)
 
         startForeground(NOTIFICATION_ID, createNotification("준비 중...", 0))
@@ -78,6 +78,7 @@ class ProcessingService : Service() {
                 val outputDir = File(cacheDir, "processing").also { it.mkdirs() }
 
                 if (mode == ProcessingMode.QUALITY || mode == ProcessingMode.BOTH) {
+                    var qualityFailed = false
                     aiQualityPipeline.enhance(videoUri, outputDir).collect { result ->
                         when (result) {
                             is AiQualityPipeline.QualityResult.Progress -> {
@@ -94,14 +95,18 @@ class ProcessingService : Service() {
                             }
                             is AiQualityPipeline.QualityResult.Error -> {
                                 _processingState.value = ProcessingState.Error(result.message)
-                                stopSelf()
-                                return@collect
+                                qualityFailed = true
                             }
                         }
+                    }
+                    if (qualityFailed) {
+                        stopSelf()
+                        return@launch
                     }
                 }
 
                 if (mode == ProcessingMode.SUBTITLE || mode == ProcessingMode.BOTH) {
+                    var subtitleFailed = false
                     subtitleGenerator.generate(videoUri).collect { result ->
                         when (result) {
                             is SubtitleGenerator.SubtitleResult.Progress -> {
@@ -118,10 +123,13 @@ class ProcessingService : Service() {
                             }
                             is SubtitleGenerator.SubtitleResult.Error -> {
                                 _processingState.value = ProcessingState.Error(result.message)
-                                stopSelf()
-                                return@collect
+                                subtitleFailed = true
                             }
                         }
+                    }
+                    if (subtitleFailed) {
+                        stopSelf()
+                        return@launch
                     }
                 }
 

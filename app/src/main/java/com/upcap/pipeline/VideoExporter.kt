@@ -2,6 +2,8 @@ package com.upcap.pipeline
 
 import android.content.Context
 import android.graphics.Typeface
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -15,10 +17,12 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.OverlaySettings
 import androidx.media3.effect.TextOverlay
+import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.VideoEncoderSettings
 import com.google.common.collect.ImmutableList
 import com.upcap.model.SubtitleSegment
 import kotlinx.coroutines.Dispatchers
@@ -72,6 +76,9 @@ class VideoExporter @Inject constructor(
         val mainHandler = Handler(Looper.getMainLooper())
         var transformer: Transformer? = null
 
+        val videoHeight = getVideoHeight(inputPath)
+        val fontSizeDp = scaleFontSize(videoHeight)
+
         val visibleOverlaySettings = OverlaySettings.Builder()
             .setBackgroundFrameAnchor(0f, 0.78f)
             .setOverlayFrameAnchor(0f, 1f)
@@ -86,7 +93,7 @@ class VideoExporter @Inject constructor(
         val subtitleOverlay = object : TextOverlay() {
             override fun getText(presentationTimeUs: Long): SpannableString {
                 val current = findSubtitle(subtitles, presentationTimeUs / 1_000)
-                return buildSubtitleText(current?.text.orEmpty())
+                return buildSubtitleText(current?.text.orEmpty(), fontSizeDp)
             }
 
             override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
@@ -124,7 +131,17 @@ class VideoExporter @Inject constructor(
                     )
                     .build()
 
+                val sourceBitrate = getVideoBitrate(inputPath)
+                val videoEncoderSettings = VideoEncoderSettings.Builder()
+                    .setBitrate(sourceBitrate)
+                    .build()
+                val encoderFactory = DefaultEncoderFactory.Builder(context)
+                    .setRequestedVideoEncoderSettings(videoEncoderSettings)
+                    .build()
+
                 transformer = Transformer.Builder(context)
+                    .setVideoMimeType("video/avc")
+                    .setEncoderFactory(encoderFactory)
                     .addListener(object : Transformer.Listener {
                         override fun onCompleted(
                             composition: androidx.media3.transformer.Composition,
@@ -166,7 +183,7 @@ class VideoExporter @Inject constructor(
         return subtitles.firstOrNull { presentationTimeMs in it.startMs until it.endMs }
     }
 
-    private fun buildSubtitleText(text: String): SpannableString {
+    private fun buildSubtitleText(text: String, fontSizeDp: Int): SpannableString {
         val displayText = text.trim().ifEmpty { " " }
         return SpannableString(displayText).apply {
             setSpan(
@@ -188,11 +205,58 @@ class VideoExporter @Inject constructor(
                 SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
             )
             setSpan(
-                AbsoluteSizeSpan(20, true),
+                AbsoluteSizeSpan(fontSizeDp, true),
                 0,
                 length,
                 SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE
             )
+        }
+    }
+
+    /** Scale subtitle font size based on video height for readability. */
+    private fun scaleFontSize(videoHeight: Int): Int = when {
+        videoHeight >= 2160 -> 36   // 4K
+        videoHeight >= 1080 -> 24   // 1080p
+        videoHeight >= 720 -> 20    // 720p
+        videoHeight >= 480 -> 16    // 480p
+        else -> 14                  // smaller
+    }
+
+    private fun getVideoHeight(path: String): Int {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(path)
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("video/")) {
+                    return format.getInteger(MediaFormat.KEY_HEIGHT)
+                }
+            }
+            720
+        } catch (_: Exception) {
+            720
+        } finally {
+            runCatching { extractor.release() }
+        }
+    }
+
+    private fun getVideoBitrate(path: String): Int {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(path)
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("video/") && format.containsKey(MediaFormat.KEY_BIT_RATE)) {
+                    return format.getInteger(MediaFormat.KEY_BIT_RATE)
+                }
+            }
+            4_000_000
+        } catch (_: Exception) {
+            4_000_000
+        } finally {
+            runCatching { extractor.release() }
         }
     }
 }

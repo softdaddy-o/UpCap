@@ -47,6 +47,12 @@ class SubtitleGenerator @Inject constructor(
 
             send(SubtitleResult.Progress(0.85f))
 
+            // Guard: if transcript has no Korean characters, Whisper likely misidentified the language
+            if (transcript.isNotEmpty() && !transcript.any { it in '\uAC00'..'\uD7A3' || it in '\u3131'..'\u3163' }) {
+                send(SubtitleResult.Error("음성 언어를 인식하지 못했습니다. 한국어 음성이 포함된 영상으로 다시 시도해 주세요."))
+                return@channelFlow
+            }
+
             val subtitles = estimateSegmentsFromTranscript(transcript, durationMs)
             if (subtitles.isEmpty()) {
                 send(SubtitleResult.Error("AI 자막 인식 결과가 비어 있습니다. 음성이 분명한 영상으로 다시 시도해 주세요."))
@@ -71,7 +77,7 @@ class SubtitleGenerator @Inject constructor(
             return emptyList()
         }
 
-        val chunks = cleaned.split(Regex("(?<=[.!?])\\s+|\\n+"))
+        val chunks = cleaned.split(Regex("(?<=[.!?。！？~])[\\s]*|(?<=[다요죠까지네세]+)[.，,]?\\s+|\\n+"))
             .map { it.trim() }
             .flatMap { wrapText(it, maxCharsPerLine = 16, maxLines = 2) }
             .filter { it.isNotBlank() }
@@ -92,7 +98,7 @@ class SubtitleGenerator @Inject constructor(
             SubtitleSegment(
                 id = index,
                 startMs = cursorMs,
-                endMs = maxOf(endMs, cursorMs + 900),
+                endMs = maxOf(endMs, cursorMs + 900).coerceAtMost(safeDurationMs),
                 text = chunk
             ).also {
                 cursorMs = endMs
@@ -280,17 +286,62 @@ class SubtitleGenerator @Inject constructor(
             return samples
         }
 
-        val newSize = (samples.size.toDouble() * toRate / fromRate).toInt().coerceAtLeast(1)
+        // Apply low-pass filter before decimation to prevent aliasing
+        val filtered = if (fromRate > toRate) {
+            lowPassFilter(samples, toRate.toFloat() / fromRate * 0.9f)
+        } else {
+            samples
+        }
+
+        val newSize = (filtered.size.toDouble() * toRate / fromRate).toInt().coerceAtLeast(1)
         val result = ShortArray(newSize)
         val ratio = fromRate.toDouble() / toRate
         for (i in result.indices) {
             val position = i * ratio
-            val leftIndex = position.toInt().coerceIn(0, samples.lastIndex)
-            val rightIndex = (leftIndex + 1).coerceAtMost(samples.lastIndex)
+            val leftIndex = position.toInt().coerceIn(0, filtered.lastIndex)
+            val rightIndex = (leftIndex + 1).coerceAtMost(filtered.lastIndex)
             val fraction = position - leftIndex
-            val left = samples[leftIndex].toDouble()
-            val right = samples[rightIndex].toDouble()
+            val left = filtered[leftIndex].toDouble()
+            val right = filtered[rightIndex].toDouble()
             result[i] = (left + (right - left) * fraction).toInt().toShort()
+        }
+        return result
+    }
+
+    /**
+     * Simple windowed-sinc low-pass filter for anti-aliasing before decimation.
+     * cutoff is normalized frequency (0..1 where 1 = Nyquist).
+     */
+    private fun lowPassFilter(samples: ShortArray, cutoff: Float): ShortArray {
+        val taps = 31
+        val halfTaps = taps / 2
+        val kernel = DoubleArray(taps)
+        var kernelSum = 0.0
+
+        for (i in 0 until taps) {
+            val n = i - halfTaps
+            val sinc = if (n == 0) {
+                cutoff.toDouble()
+            } else {
+                val x = n * Math.PI * cutoff
+                kotlin.math.sin(x) / (n * Math.PI)
+            }
+            // Hamming window
+            val window = 0.54 - 0.46 * kotlin.math.cos(2.0 * Math.PI * i / (taps - 1))
+            kernel[i] = sinc * window
+            kernelSum += kernel[i]
+        }
+        // Normalize
+        for (i in kernel.indices) kernel[i] /= kernelSum
+
+        val result = ShortArray(samples.size)
+        for (i in samples.indices) {
+            var sum = 0.0
+            for (j in 0 until taps) {
+                val idx = (i - halfTaps + j).coerceIn(0, samples.lastIndex)
+                sum += samples[idx].toDouble() * kernel[j]
+            }
+            result[i] = sum.toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         }
         return result
     }

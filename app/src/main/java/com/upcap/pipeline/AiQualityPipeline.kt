@@ -3,34 +3,27 @@ package com.upcap.pipeline
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
-import ai.onnxruntime.TensorInfo
 import android.content.Context
 import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
+import android.media.Image
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
-import androidx.media3.common.Effect
-import androidx.media3.common.MediaItem
-import androidx.media3.common.audio.AudioProcessor
-import androidx.media3.effect.Contrast
-import androidx.media3.effect.HslAdjustment
-import androidx.media3.effect.RgbAdjustment
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.ProgressHolder
-import androidx.media3.transformer.Transformer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
 import java.nio.FloatBuffer
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 import javax.inject.Inject
+import kotlin.coroutines.coroutineContext
 
 class AiQualityPipeline @Inject constructor(
     private val context: Context
@@ -41,19 +34,20 @@ class AiQualityPipeline @Inject constructor(
 
         try {
             send(QualityResult.Progress(0.05f))
-            val profile = analyzeQualityProfile(inputPath) { progress ->
-                trySend(QualityResult.Progress(0.05f + progress * 0.25f))
+
+            val modelFile = ModelAssetManager.getInstance(context)
+                .ensureAvailable(AiModelKind.QUALITY) { progress ->
+                    trySend(QualityResult.Progress(0.05f + progress * 0.15f))
+                }
+
+            send(QualityResult.Progress(0.20f))
+
+            processVideo(inputPath, outputPath, modelFile) { progress ->
+                trySend(QualityResult.Progress(0.20f + progress * 0.75f))
             }
-            send(QualityResult.Progress(0.35f))
-            encodeEnhancedVideo(
-                inputPath = inputPath,
-                outputPath = outputPath,
-                profile = profile
-            ) { progress ->
-                trySend(QualityResult.Progress(0.35f + progress * 0.60f))
-            }
+
             send(QualityResult.Progress(1.0f))
-            send(QualityResult.Success(outputPath, profile))
+            send(QualityResult.Success(outputPath))
         } catch (e: Exception) {
             send(QualityResult.Error("AI 화질 개선 실패: ${e.message ?: "알 수 없는 오류"}"))
         } finally {
@@ -61,132 +55,434 @@ class AiQualityPipeline @Inject constructor(
         }
     }.flowOn(Dispatchers.IO)
 
-    private suspend fun analyzeQualityProfile(
+    // ── Video processing: decode → tile SR → encode ──────────────────────
+
+    private suspend fun processVideo(
         inputPath: String,
+        outputPath: String,
+        modelFile: File,
         onProgress: (Float) -> Unit
-    ): QualityProfile {
-        val modelFile = ModelAssetManager.getInstance(context)
-            .ensureAvailable(AiModelKind.QUALITY, onProgress)
-        val retriever = MediaMetadataRetriever()
+    ) {
+        val env = OrtEnvironment.getEnvironment()
+        val sessionOptions = OrtSession.SessionOptions().apply {
+            setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+            setInterOpNumThreads(1)
+            setCPUArenaAllocator(true)
+        }
 
-        return try {
-            retriever.setDataSource(inputPath)
-            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                ?.toLongOrNull()
-                ?.coerceAtLeast(1L)
-                ?: 1L
+        env.createSession(modelFile.absolutePath, sessionOptions).use { session ->
+            val videoExtractor = MediaExtractor()
+            val audioExtractor = MediaExtractor()
 
-            val sampleTimesMs = listOf(0.15f, 0.5f, 0.85f)
-                .map { (durationMs * it).toLong() }
-                .distinct()
+            try {
+                videoExtractor.setDataSource(inputPath)
+                audioExtractor.setDataSource(inputPath)
 
-            val environment = OrtEnvironment.getEnvironment()
-            OrtSession.SessionOptions().use { options ->
-                options.setIntraOpNumThreads(1)
-                options.setInterOpNumThreads(1)
-                options.setCPUArenaAllocator(true)
-                environment.createSession(modelFile.absolutePath, options).use { session ->
-                    val metrics = sampleTimesMs.mapIndexedNotNull { index, timeMs ->
-                        onProgress((index + 1).toFloat() / sampleTimesMs.size)
-                        retriever.getFrameAtTime(timeMs * 1_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                            ?.let { bitmap ->
-                                bitmap.useBitmap { analyzeFrame(it, environment, session) }
-                            }
-                    }
-
-                    if (metrics.isEmpty()) {
-                        throw IllegalStateException("분석할 프레임을 읽지 못했습니다.")
-                    }
-
-                    buildProfile(metrics)
+                val videoTrackIndex = findTrack(videoExtractor, "video/")
+                if (videoTrackIndex < 0) {
+                    throw IllegalStateException("비디오 트랙을 찾지 못했습니다")
                 }
+
+                val videoFormat = videoExtractor.getTrackFormat(videoTrackIndex)
+                val width = videoFormat.getInteger(MediaFormat.KEY_WIDTH)
+                val height = videoFormat.getInteger(MediaFormat.KEY_HEIGHT)
+                val mime = videoFormat.getString(MediaFormat.KEY_MIME)!!
+                val durationUs = videoFormat.getLongOrDefault(MediaFormat.KEY_DURATION, 0L)
+                val frameRate = videoFormat.getIntOrDefault(MediaFormat.KEY_FRAME_RATE, 30)
+                val totalFrames = if (durationUs > 0) {
+                    (durationUs / 1_000_000.0 * frameRate).toLong().coerceAtLeast(1)
+                } else 1L
+
+                videoExtractor.selectTrack(videoTrackIndex)
+
+                // Decoder
+                val decoder = MediaCodec.createDecoderByType(mime)
+                decoder.configure(videoFormat, null, null, 0)
+                decoder.start()
+
+                // Encoder — match or exceed source bitrate for quality
+                val sourceBitrate = videoFormat.getIntOrDefault(
+                    MediaFormat.KEY_BIT_RATE,
+                    width * height * frameRate / 4
+                )
+                val targetBitrate = (sourceBitrate * 1.5).toInt()
+                    .coerceAtLeast(width * height * 3)
+
+                val encoderFormat = MediaFormat.createVideoFormat("video/avc", width, height).apply {
+                    setInteger(MediaFormat.KEY_BIT_RATE, targetBitrate)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    setInteger(
+                        MediaFormat.KEY_COLOR_FORMAT,
+                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+                    )
+                }
+                val encoder = MediaCodec.createEncoderByType("video/avc")
+                encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                encoder.start()
+
+                // Muxer
+                val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val rotation = videoFormat.getIntOrDefault(MediaFormat.KEY_ROTATION, 0)
+                if (rotation != 0) {
+                    muxer.setOrientationHint(rotation)
+                }
+                var videoTrackId = -1
+                var audioTrackId = -1
+                var muxerStarted = false
+
+                // Find and prepare audio track
+                val audioTrackIndex = findTrack(audioExtractor, "audio/")
+                val audioFormat = if (audioTrackIndex >= 0) {
+                    audioExtractor.selectTrack(audioTrackIndex)
+                    audioExtractor.getTrackFormat(audioTrackIndex)
+                } else null
+
+                val decoderInfo = MediaCodec.BufferInfo()
+                val encoderInfo = MediaCodec.BufferInfo()
+                var inputDone = false
+                var decodeDone = false
+                var encodeDone = false
+                var framesProcessed = 0L
+
+                try {
+                    while (!encodeDone) {
+                        coroutineContext.ensureActive()
+
+                        // 1. Drain encoder output to muxer (free buffers before feeding)
+                        val drain = drainEncoder(
+                            encoder, encoderInfo, muxer, audioFormat,
+                            videoTrackId, audioTrackId, muxerStarted
+                        )
+                        videoTrackId = drain.videoTrackId
+                        audioTrackId = drain.audioTrackId
+                        muxerStarted = drain.muxerStarted
+                        if (drain.encodeDone) encodeDone = true
+
+                        // 2. Feed compressed data to decoder
+                        if (!inputDone) {
+                            val inputIndex = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                            if (inputIndex >= 0) {
+                                val inputBuffer = decoder.getInputBuffer(inputIndex)!!
+                                val sampleSize = videoExtractor.readSampleData(inputBuffer, 0)
+                                if (sampleSize < 0) {
+                                    decoder.queueInputBuffer(
+                                        inputIndex, 0, 0, 0L,
+                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                    )
+                                    inputDone = true
+                                } else {
+                                    decoder.queueInputBuffer(
+                                        inputIndex, 0, sampleSize,
+                                        videoExtractor.sampleTime, 0
+                                    )
+                                    videoExtractor.advance()
+                                }
+                            }
+                        }
+
+                        // 3. Get decoded frames, enhance, feed to encoder
+                        if (!decodeDone) {
+                            val outputIndex = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)
+                            if (outputIndex >= 0) {
+                                val isEos = (decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+
+                                if (isEos) {
+                                    decoder.releaseOutputBuffer(outputIndex, false)
+                                    decodeDone = true
+                                    // Signal EOS to encoder
+                                    val encInIdx = encoder.dequeueInputBuffer(CODEC_TIMEOUT_US * 100)
+                                    if (encInIdx >= 0) {
+                                        encoder.queueInputBuffer(
+                                            encInIdx, 0, 0, 0L,
+                                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                        )
+                                    }
+                                } else {
+                                    val pts = decoderInfo.presentationTimeUs
+                                    val image = decoder.getOutputImage(outputIndex)
+
+                                    if (image != null) {
+                                        val frameBitmap = yuvImageToArgbBitmap(image)
+                                        decoder.releaseOutputBuffer(outputIndex, false)
+
+                                        // Tile-based super-resolution
+                                        val enhanced = enhanceFrame(frameBitmap, env, session)
+                                        frameBitmap.recycle()
+
+                                        // Feed enhanced frame to encoder
+                                        feedFrameToEncoder(enhanced, encoder, pts)
+                                        enhanced.recycle()
+
+                                        framesProcessed++
+                                        onProgress(
+                                            (framesProcessed.toFloat() / totalFrames).coerceAtMost(1f)
+                                        )
+                                    } else {
+                                        decoder.releaseOutputBuffer(outputIndex, false)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Verify frames were actually processed
+                    if (framesProcessed == 0L || !muxerStarted) {
+                        throw IllegalStateException("영상 프레임을 처리하지 못했습니다")
+                    }
+
+                    // 4. Copy audio track
+                    if (audioTrackIndex >= 0 && muxerStarted && audioTrackId >= 0) {
+                        copyAudioSamples(audioExtractor, muxer, audioTrackId)
+                    }
+                } finally {
+                    runCatching { muxer.stop() }
+                    runCatching { muxer.release() }
+                    runCatching { encoder.stop() }
+                    runCatching { encoder.release() }
+                    runCatching { decoder.stop() }
+                    runCatching { decoder.release() }
+                }
+            } finally {
+                runCatching { videoExtractor.release() }
+                runCatching { audioExtractor.release() }
             }
-        } finally {
-            runCatching { retriever.release() }
         }
     }
 
-    private fun analyzeFrame(
-        source: Bitmap,
-        environment: OrtEnvironment,
-        session: OrtSession
-    ): FrameMetrics {
-        val sourceArgb = source.copy(Bitmap.Config.ARGB_8888, false)
-        val resized = Bitmap.createScaledBitmap(
-            sourceArgb,
-            MODEL_INPUT_SIZE,
-            MODEL_INPUT_SIZE,
-            true
-        )
-        if (resized !== sourceArgb) {
-            sourceArgb.recycle()
-        }
+    private fun drainEncoder(
+        encoder: MediaCodec,
+        info: MediaCodec.BufferInfo,
+        muxer: MediaMuxer,
+        audioFormat: MediaFormat?,
+        currentVideoTrackId: Int,
+        currentAudioTrackId: Int,
+        currentMuxerStarted: Boolean
+    ): DrainResult {
+        var videoTrackId = currentVideoTrackId
+        var audioTrackId = currentAudioTrackId
+        var muxerStarted = currentMuxerStarted
+        var encodeDone = false
 
-        return resized.useBitmap { bitmap ->
-            val pixels = IntArray(MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
-            bitmap.getPixels(pixels, 0, MODEL_INPUT_SIZE, 0, 0, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE)
-
-            val yChannel = FloatArray(pixels.size)
-            var brightnessSum = 0f
-            var saturationSum = 0f
-
-            for (index in pixels.indices) {
-                val color = pixels[index]
-                val r = (color shr 16) and 0xFF
-                val g = (color shr 8) and 0xFF
-                val b = color and 0xFF
-
-                val max = maxOf(r, g, b)
-                val min = minOf(r, g, b)
-                val saturation = if (max == 0) 0f else (max - min).toFloat() / max.toFloat()
-                val y = ((0.299f * r) + (0.587f * g) + (0.114f * b)) / 255f
-
-                yChannel[index] = y
-                brightnessSum += y
-                saturationSum += saturation
-            }
-
-            val meanBrightness = brightnessSum / pixels.size
-            val meanSaturation = saturationSum / pixels.size
-            val contrast = standardDeviation(yChannel, meanBrightness)
-
-            val inputBuffer = FloatBuffer.allocate(MODEL_CHANNELS * MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
-            putRgbNchw(inputBuffer, pixels)
-            inputBuffer.rewind()
-
-            val inputName = session.inputNames.first()
-            OnnxTensor.createTensor(
-                environment,
-                inputBuffer,
-                longArrayOf(
-                    1,
-                    MODEL_CHANNELS.toLong(),
-                    MODEL_INPUT_SIZE.toLong(),
-                    MODEL_INPUT_SIZE.toLong()
-                )
-            ).use { tensor ->
-                session.run(mapOf(inputName to tensor)).use { result ->
-                    val output = result.get(0) as? OnnxTensor
-                        ?: throw IllegalStateException("AI 모델 출력이 비어 있습니다.")
-                    output.use {
-                        val outputBuffer = output.floatBuffer
-                        val enhanced = FloatArray(outputBuffer.remaining())
-                        outputBuffer.get(enhanced)
-                        val outputShape = (output.info as? TensorInfo)?.shape
-                        val detailGain = calculateDetailGain(yChannel, enhanced, outputShape)
-                        FrameMetrics(
-                            brightness = meanBrightness,
-                            contrast = contrast,
-                            saturation = meanSaturation,
-                            detailGain = detailGain
-                        )
+        while (true) {
+            val encOutIndex = encoder.dequeueOutputBuffer(info, 0)
+            when {
+                encOutIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    if (!muxerStarted) {
+                        videoTrackId = muxer.addTrack(encoder.outputFormat)
+                        audioTrackId = if (audioFormat != null) {
+                            muxer.addTrack(audioFormat)
+                        } else -1
+                        muxer.start()
+                        muxerStarted = true
                     }
                 }
+                encOutIndex >= 0 -> {
+                    val buf = encoder.getOutputBuffer(encOutIndex)
+                    if (buf != null && muxerStarted && info.size > 0) {
+                        buf.position(info.offset)
+                        buf.limit(info.offset + info.size)
+                        muxer.writeSampleData(videoTrackId, buf, info)
+                    }
+                    val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                    encoder.releaseOutputBuffer(encOutIndex, false)
+                    if (isEos) {
+                        encodeDone = true
+                        break
+                    }
+                }
+                else -> break
+            }
+        }
+
+        return DrainResult(videoTrackId, audioTrackId, muxerStarted, encodeDone)
+    }
+
+    private fun feedFrameToEncoder(
+        bitmap: Bitmap,
+        encoder: MediaCodec,
+        presentationTimeUs: Long
+    ) {
+        val encInIdx = encoder.dequeueInputBuffer(CODEC_TIMEOUT_US * 100)
+        if (encInIdx < 0) return
+
+        val w = bitmap.width
+        val h = bitmap.height
+        val encImage = encoder.getInputImage(encInIdx)
+        if (encImage != null) {
+            writeArgbToYuvImage(bitmap, encImage)
+            encoder.queueInputBuffer(
+                encInIdx, 0,
+                w * h * 3 / 2,
+                presentationTimeUs, 0
+            )
+        } else {
+            // Fallback: write NV12 bytes directly
+            val buffer = encoder.getInputBuffer(encInIdx)
+            if (buffer != null) {
+                writeArgbToNv12Buffer(bitmap, buffer, w, h)
+                encoder.queueInputBuffer(
+                    encInIdx, 0,
+                    w * h * 3 / 2,
+                    presentationTimeUs, 0
+                )
+            }
+        }
+    }
+
+    private fun copyAudioSamples(
+        audioExtractor: MediaExtractor,
+        muxer: MediaMuxer,
+        audioTrackId: Int
+    ) {
+        val buffer = java.nio.ByteBuffer.allocate(256 * 1024)
+        val info = MediaCodec.BufferInfo()
+
+        while (true) {
+            val sampleSize = audioExtractor.readSampleData(buffer, 0)
+            if (sampleSize < 0) break
+            info.offset = 0
+            info.size = sampleSize
+            info.presentationTimeUs = audioExtractor.sampleTime
+            info.flags = audioExtractor.sampleFlags
+            muxer.writeSampleData(audioTrackId, buffer, info)
+            audioExtractor.advance()
+        }
+    }
+
+    // ── Tile-based super-resolution ─────────────────────────────────────
+
+    private fun enhanceFrame(
+        frame: Bitmap,
+        env: OrtEnvironment,
+        session: OrtSession
+    ): Bitmap {
+        val w = frame.width
+        val h = frame.height
+
+        // Convert to sRGB to ensure model gets consistent input
+        val srgbFrame = if (frame.config == Bitmap.Config.ARGB_8888) {
+            frame
+        } else {
+            frame.copy(Bitmap.Config.ARGB_8888, false)
+        }
+
+        val srcPixels = IntArray(w * h)
+        srgbFrame.getPixels(srcPixels, 0, w, 0, 0, w, h)
+        if (srgbFrame !== frame) srgbFrame.recycle()
+
+        // Output bitmap at original resolution (SR quality at same res)
+        val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+        val tilesX = ceilDiv(w, TILE_STRIDE)
+        val tilesY = ceilDiv(h, TILE_STRIDE)
+
+        for (ty in 0 until tilesY) {
+            for (tx in 0 until tilesX) {
+                // Region this tile is responsible for in the output
+                val outLeft = tx * TILE_STRIDE
+                val outTop = ty * TILE_STRIDE
+                val outRight = minOf(outLeft + TILE_STRIDE, w)
+                val outBottom = minOf(outTop + TILE_STRIDE, h)
+
+                // Source tile with overlap padding (clamped at edges)
+                val srcLeft = (outLeft - TILE_OVERLAP).coerceAtLeast(0)
+                val srcTop = (outTop - TILE_OVERLAP).coerceAtLeast(0)
+
+                // Extract tile with clamping for edge pixels
+                val tilePixels = extractTile(srcPixels, w, h, srcLeft, srcTop, TILE_SIZE)
+
+                // Run super-resolution: TILE_SIZE → TILE_SIZE * SCALE
+                val srPixels = processTile(tilePixels, env, session)
+                val srSize = TILE_SIZE * SCALE
+
+                // Calculate crop region in SR output to get the non-overlapped center
+                val padLeft = outLeft - srcLeft
+                val padTop = outTop - srcTop
+                val usableW = outRight - outLeft
+                val usableH = outBottom - outTop
+
+                val cropLeft = padLeft * SCALE
+                val cropTop = padTop * SCALE
+                val cropRight = cropLeft + usableW * SCALE
+                val cropBottom = cropTop + usableH * SCALE
+
+                // Create bitmap from SR pixels, draw downscaled region to output
+                val srBitmap = Bitmap.createBitmap(srPixels, srSize, srSize, Bitmap.Config.ARGB_8888)
+                canvas.drawBitmap(
+                    srBitmap,
+                    Rect(cropLeft, cropTop, cropRight, cropBottom),
+                    Rect(outLeft, outTop, outRight, outBottom),
+                    paint
+                )
+                srBitmap.recycle()
+            }
+        }
+
+        return output
+    }
+
+    private fun extractTile(
+        srcPixels: IntArray,
+        srcW: Int,
+        srcH: Int,
+        startX: Int,
+        startY: Int,
+        tileSize: Int
+    ): IntArray {
+        val tile = IntArray(tileSize * tileSize)
+        for (y in 0 until tileSize) {
+            val sy = (startY + y).coerceIn(0, srcH - 1)
+            for (x in 0 until tileSize) {
+                val sx = (startX + x).coerceIn(0, srcW - 1)
+                tile[y * tileSize + x] = srcPixels[sy * srcW + sx]
+            }
+        }
+        return tile
+    }
+
+    private fun processTile(
+        tilePixels: IntArray,
+        env: OrtEnvironment,
+        session: OrtSession
+    ): IntArray {
+        val inputBuffer = FloatBuffer.allocate(MODEL_CHANNELS * TILE_SIZE * TILE_SIZE)
+        putRgbNchw(inputBuffer, tilePixels)
+        inputBuffer.rewind()
+
+        val inputName = session.inputNames.first()
+        OnnxTensor.createTensor(
+            env, inputBuffer,
+            longArrayOf(1, MODEL_CHANNELS.toLong(), TILE_SIZE.toLong(), TILE_SIZE.toLong())
+        ).use { tensor ->
+            session.run(mapOf(inputName to tensor)).use { result ->
+                val output = result.get(0) as? OnnxTensor
+                    ?: throw IllegalStateException("AI 모델 출력이 비어 있습니다.")
+
+                val outputBuf = output.floatBuffer
+                val enhanced = FloatArray(outputBuf.remaining())
+                outputBuf.get(enhanced)
+
+                val outSize = TILE_SIZE * SCALE
+                val planeSize = outSize * outSize
+                val pixels = IntArray(planeSize)
+
+                for (i in 0 until planeSize) {
+                    val r = (enhanced[i] * 255f).toInt().coerceIn(0, 255)
+                    val g = (enhanced[planeSize + i] * 255f).toInt().coerceIn(0, 255)
+                    val b = (enhanced[2 * planeSize + i] * 255f).toInt().coerceIn(0, 255)
+                    pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
+
+                return pixels
             }
         }
     }
 
     private fun putRgbNchw(buffer: FloatBuffer, pixels: IntArray) {
+        // Channel-first layout: all R, then all G, then all B
         for (channel in 0 until MODEL_CHANNELS) {
             for (color in pixels) {
                 val value = when (channel) {
@@ -199,172 +495,144 @@ class AiQualityPipeline @Inject constructor(
         }
     }
 
-    private fun calculateDetailGain(
-        inputY: FloatArray,
-        enhanced: FloatArray,
-        outputShape: LongArray?
-    ): Float {
-        val layout = OutputLayout.from(outputShape, enhanced.size)
-        var differenceSum = 0f
-        for (y in 0 until MODEL_INPUT_SIZE) {
-            val inputRow = y * MODEL_INPUT_SIZE
-            for (x in 0 until MODEL_INPUT_SIZE) {
-                val sampleX = (x * layout.width / MODEL_INPUT_SIZE).coerceIn(0, layout.width - 1)
-                val sampleY = (y * layout.height / MODEL_INPUT_SIZE).coerceIn(0, layout.height - 1)
-                val enhancedValue = layout.lumaAt(enhanced, sampleX, sampleY)
-                differenceSum += kotlin.math.abs(enhancedValue - inputY[inputRow + x])
+    // ── YUV ↔ RGB conversion (BT.709) ───────────────────────────────────
+
+    private fun yuvImageToArgbBitmap(image: Image): Bitmap {
+        val crop = image.cropRect
+        val width = crop.width()
+        val height = crop.height()
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+
+        val yRowStride = yPlane.rowStride
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
+
+        val argb = IntArray(width * height)
+
+        for (row in 0 until height) {
+            for (col in 0 until width) {
+                val srcRow = crop.top + row
+                val srcCol = crop.left + col
+                val yVal = yBuf[srcRow * yRowStride + srcCol].toInt() and 0xFF
+                val uvRow = srcRow / 2
+                val uvCol = srcCol / 2
+                val uVal = uBuf[uvRow * uvRowStride + uvCol * uvPixelStride].toInt() and 0xFF
+                val vVal = vBuf[uvRow * uvRowStride + uvCol * uvPixelStride].toInt() and 0xFF
+
+                // BT.709 limited-range → full-range RGB
+                val y = (yVal - 16) * (1f / 219f)
+                val cb = (uVal - 128) * (1f / 224f)
+                val cr = (vVal - 128) * (1f / 224f)
+
+                val r = (y + 1.5748f * cr).coerceIn(0f, 1f)
+                val g = (y - 0.1873f * cb - 0.4681f * cr).coerceIn(0f, 1f)
+                val b = (y + 1.8556f * cb).coerceIn(0f, 1f)
+
+                argb[row * width + col] = (0xFF shl 24) or
+                        ((r * 255f).toInt() shl 16) or
+                        ((g * 255f).toInt() shl 8) or
+                        (b * 255f).toInt()
             }
         }
-        return differenceSum / inputY.size
+
+        return Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888)
     }
 
-    private fun buildProfile(metrics: List<FrameMetrics>): QualityProfile {
-        val averageBrightness = metrics.map { it.brightness }.average().toFloat()
-        val averageContrast = metrics.map { it.contrast }.average().toFloat()
-        val averageSaturation = metrics.map { it.saturation }.average().toFloat()
-        val averageDetailGain = metrics.map { it.detailGain }.average().toFloat()
+    private fun writeArgbToYuvImage(bitmap: Bitmap, image: Image) {
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        val brightnessLift = when {
-            averageBrightness < 0.30f -> 4.5f
-            averageBrightness < 0.40f -> 3f
-            averageBrightness < 0.48f -> 1.5f
-            else -> 0.4f
-        }
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
 
-        val saturationBoost = when {
-            averageSaturation < 0.14f -> 7f
-            averageSaturation < 0.22f -> 5f
-            averageSaturation < 0.30f -> 3f
-            else -> 1.5f
-        }
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
 
-        val contrastBoost = when {
-            averageContrast < 0.10f -> 0.10f
-            averageContrast < 0.15f -> 0.08f
-            averageContrast < 0.20f -> 0.06f
-            else -> 0.04f
-        } + ((0.06f - averageDetailGain).coerceAtLeast(0f) * 0.35f)
+        val yRowStride = yPlane.rowStride
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
 
-        val shadowBlueBias = if (averageBrightness < 0.36f) 1.012f else 1.005f
-        val warmthRecovery = if (averageSaturation < 0.18f) 1.012f else 1.006f
+        for (row in 0 until height) {
+            for (col in 0 until width) {
+                val color = pixels[row * width + col]
+                val rf = ((color shr 16) and 0xFF) / 255f
+                val gf = ((color shr 8) and 0xFF) / 255f
+                val bf = (color and 0xFF) / 255f
 
-        return QualityProfile(
-            lightnessBoost = brightnessLift,
-            saturationBoost = saturationBoost,
-            contrastBoost = contrastBoost.coerceIn(0.03f, 0.12f),
-            redScale = warmthRecovery,
-            greenScale = 1.004f,
-            blueScale = shadowBlueBias,
-            sceneLabel = when {
-                averageBrightness < 0.34f -> "low_light"
-                averageContrast < 0.12f -> "flat"
-                averageSaturation < 0.16f -> "faded"
-                else -> "balanced"
-            }
-        )
-    }
+                // BT.709 full-range RGB → limited-range YCbCr
+                val yf = 0.2126f * rf + 0.7152f * gf + 0.0722f * bf
+                val yVal = (16 + 219 * yf).toInt().coerceIn(16, 235)
+                yBuf.put(row * yRowStride + col, yVal.toByte())
 
-    private suspend fun encodeEnhancedVideo(
-        inputPath: String,
-        outputPath: String,
-        profile: QualityProfile,
-        onProgress: (Float) -> Unit
-    ) = suspendCancellableCoroutine<Unit> { continuation ->
-        val mainHandler = Handler(Looper.getMainLooper())
-        var transformer: Transformer? = null
-        val progressHolder = ProgressHolder()
-
-        val progressPoller = object : Runnable {
-            override fun run() {
-                val currentTransformer = transformer
-                if (currentTransformer != null) {
-                    val progressState = currentTransformer.getProgress(progressHolder)
-                    if (progressState == Transformer.PROGRESS_STATE_AVAILABLE) {
-                        onProgress((progressHolder.progress / 100f).coerceIn(0f, 1f))
-                    }
-                }
-
-                if (continuation.isActive) {
-                    mainHandler.postDelayed(this, 250L)
-                }
-            }
-        }
-
-        fun cleanup() {
-            mainHandler.removeCallbacks(progressPoller)
-            runCatching { transformer?.cancel() }
-            transformer = null
-        }
-
-        continuation.invokeOnCancellation {
-            mainHandler.post { cleanup() }
-        }
-
-        mainHandler.post {
-            try {
-                val videoEffects = mutableListOf<Effect>(
-                    Contrast(profile.contrastBoost),
-                    HslAdjustment.Builder()
-                        .adjustLightness(profile.lightnessBoost)
-                        .adjustSaturation(profile.saturationBoost)
-                        .build(),
-                    RgbAdjustment.Builder()
-                        .setRedScale(profile.redScale)
-                        .setGreenScale(profile.greenScale)
-                        .setBlueScale(profile.blueScale)
-                        .build()
-                )
-
-                val editedMediaItem = EditedMediaItem.Builder(
-                    MediaItem.fromUri(Uri.fromFile(File(inputPath)))
-                )
-                    .setEffects(
-                        androidx.media3.transformer.Effects(
-                            emptyList<AudioProcessor>(),
-                            videoEffects
-                        )
-                    )
-                    .build()
-
-                transformer = Transformer.Builder(context)
-                    .addListener(object : Transformer.Listener {
-                        override fun onCompleted(
-                            composition: androidx.media3.transformer.Composition,
-                            exportResult: ExportResult
-                        ) {
-                            cleanup()
-                            if (continuation.isActive) {
-                                continuation.resume(Unit)
-                            }
-                        }
-
-                        override fun onError(
-                            composition: androidx.media3.transformer.Composition,
-                            exportResult: ExportResult,
-                            exportException: ExportException
-                        ) {
-                            cleanup()
-                            if (continuation.isActive) {
-                                continuation.resumeWithException(exportException)
-                            }
-                        }
-                    })
-                    .build()
-
-                transformer?.start(editedMediaItem, outputPath)
-                mainHandler.post(progressPoller)
-            } catch (e: Exception) {
-                cleanup()
-                if (continuation.isActive) {
-                    continuation.resumeWithException(e)
+                if (row % 2 == 0 && col % 2 == 0) {
+                    val cb = ((bf - yf) / 1.8556f)
+                    val cr = ((rf - yf) / 1.5748f)
+                    val uVal = (128 + 224 * cb).toInt().coerceIn(16, 240)
+                    val vVal = (128 + 224 * cr).toInt().coerceIn(16, 240)
+                    val uvIdx = (row / 2) * uvRowStride + (col / 2) * uvPixelStride
+                    uBuf.put(uvIdx, uVal.toByte())
+                    vBuf.put(uvIdx, vVal.toByte())
                 }
             }
         }
     }
+
+    private fun writeArgbToNv12Buffer(
+        bitmap: Bitmap,
+        buffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int
+    ) {
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        buffer.clear()
+
+        // Y plane
+        for (row in 0 until height) {
+            for (col in 0 until width) {
+                val color = pixels[row * width + col]
+                val rf = ((color shr 16) and 0xFF) / 255f
+                val gf = ((color shr 8) and 0xFF) / 255f
+                val bf = (color and 0xFF) / 255f
+                val yf = 0.2126f * rf + 0.7152f * gf + 0.0722f * bf
+                buffer.put((16 + 219 * yf).toInt().coerceIn(16, 235).toByte())
+            }
+        }
+
+        // UV plane (interleaved NV12: U V U V ...)
+        for (row in 0 until height step 2) {
+            for (col in 0 until width step 2) {
+                val color = pixels[row * width + col]
+                val rf = ((color shr 16) and 0xFF) / 255f
+                val gf = ((color shr 8) and 0xFF) / 255f
+                val bf = (color and 0xFF) / 255f
+                val yf = 0.2126f * rf + 0.7152f * gf + 0.0722f * bf
+                val cb = ((bf - yf) / 1.8556f)
+                val cr = ((rf - yf) / 1.5748f)
+                buffer.put((128 + 224 * cb).toInt().coerceIn(16, 240).toByte())
+                buffer.put((128 + 224 * cr).toInt().coerceIn(16, 240).toByte())
+            }
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────
 
     private fun copyToLocal(uri: Uri): String {
         val tempFile = File(context.cacheDir, "input_${System.currentTimeMillis()}.mp4")
-        context.contentResolver.openInputStream(uri)?.use { input ->
+        val inputStream = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("영상 파일을 열 수 없습니다")
+        inputStream.use { input ->
             tempFile.outputStream().use { output ->
                 input.copyTo(output)
             }
@@ -372,117 +640,43 @@ class AiQualityPipeline @Inject constructor(
         return tempFile.absolutePath
     }
 
-    data class QualityProfile(
-        val lightnessBoost: Float,
-        val saturationBoost: Float,
-        val contrastBoost: Float,
-        val redScale: Float,
-        val greenScale: Float,
-        val blueScale: Float,
-        val sceneLabel: String
-    )
+    private fun findTrack(extractor: MediaExtractor, mimePrefix: String): Int {
+        for (i in 0 until extractor.trackCount) {
+            val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+            if (mime.startsWith(mimePrefix)) return i
+        }
+        return -1
+    }
+
+    private fun ceilDiv(a: Int, b: Int): Int = (a + b - 1) / b
+
+    private fun MediaFormat.getIntOrDefault(key: String, default: Int): Int =
+        if (containsKey(key)) getInteger(key) else default
+
+    private fun MediaFormat.getLongOrDefault(key: String, default: Long): Long =
+        if (containsKey(key)) getLong(key) else default
+
+    // ── Result types ────────────────────────────────────────────────────
 
     sealed class QualityResult {
         data class Progress(val value: Float) : QualityResult()
-        data class Success(val outputPath: String, val profile: QualityProfile) : QualityResult()
+        data class Success(val outputPath: String) : QualityResult()
         data class Error(val message: String) : QualityResult()
     }
 
-    private data class FrameMetrics(
-        val brightness: Float,
-        val contrast: Float,
-        val saturation: Float,
-        val detailGain: Float
+    private data class DrainResult(
+        val videoTrackId: Int,
+        val audioTrackId: Int,
+        val muxerStarted: Boolean,
+        val encodeDone: Boolean
     )
 
     companion object {
+        private const val TILE_SIZE = 128
+        private const val TILE_OVERLAP = 8
+        private const val TILE_STRIDE = TILE_SIZE - 2 * TILE_OVERLAP // 112
+        private const val SCALE = 4
         private const val MODEL_CHANNELS = 3
-        private const val MODEL_INPUT_SIZE = 128
+        private const val CODEC_TIMEOUT_US = 10_000L
     }
 }
-
-private data class OutputLayout(
-    val width: Int,
-    val height: Int,
-    val channels: Int,
-    val channelFirst: Boolean
-) {
-    fun lumaAt(values: FloatArray, x: Int, y: Int): Float {
-        if (channels == 1) {
-            return values[(y * width + x).coerceIn(values.indices)].coerceIn(0f, 1f)
-        }
-
-        val r = sample(values, 0, x, y)
-        val g = sample(values, 1, x, y)
-        val b = sample(values, 2, x, y)
-        return ((0.299f * r) + (0.587f * g) + (0.114f * b)).coerceIn(0f, 1f)
-    }
-
-    private fun sample(values: FloatArray, channel: Int, x: Int, y: Int): Float {
-        val index = if (channelFirst) {
-            channel * width * height + y * width + x
-        } else {
-            (y * width + x) * channels + channel
-        }
-        return values[index.coerceIn(values.indices)].coerceIn(0f, 1f)
-    }
-
-    companion object {
-        fun from(shape: LongArray?, valueCount: Int): OutputLayout {
-            if (shape != null && shape.size >= 4) {
-                val dims = shape.map { if (it > 0) it.toInt() else 0 }
-                if (dims[1] in 1..4 && dims[2] > 0 && dims[3] > 0) {
-                    return OutputLayout(
-                        width = dims[3],
-                        height = dims[2],
-                        channels = dims[1],
-                        channelFirst = true
-                    )
-                }
-                if (dims[3] in 1..4 && dims[1] > 0 && dims[2] > 0) {
-                    return OutputLayout(
-                        width = dims[2],
-                        height = dims[1],
-                        channels = dims[3],
-                        channelFirst = false
-                    )
-                }
-            }
-
-            val singleChannelSize = kotlin.math.sqrt(valueCount.toDouble()).toInt().coerceAtLeast(1)
-            val threeChannelSize = kotlin.math.sqrt((valueCount / 3.0)).toInt().coerceAtLeast(1)
-            return if (threeChannelSize * threeChannelSize * 3 == valueCount) {
-                OutputLayout(
-                    width = threeChannelSize,
-                    height = threeChannelSize,
-                    channels = 3,
-                    channelFirst = true
-                )
-            } else {
-                OutputLayout(
-                    width = singleChannelSize,
-                    height = singleChannelSize,
-                    channels = 1,
-                    channelFirst = true
-                )
-            }
-        }
-    }
-}
-
-private fun standardDeviation(values: FloatArray, mean: Float): Float {
-    if (values.isEmpty()) return 0f
-    var variance = 0f
-    for (value in values) {
-        val diff = value - mean
-        variance += diff * diff
-    }
-    return kotlin.math.sqrt(variance / values.size)
-}
-
-private inline fun <T> Bitmap.useBitmap(block: (Bitmap) -> T): T =
-    try {
-        block(this)
-    } finally {
-        recycle()
-    }
