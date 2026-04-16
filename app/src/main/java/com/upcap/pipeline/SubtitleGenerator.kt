@@ -10,7 +10,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
-import mx.valdora.whisper.WhisperContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -41,8 +40,8 @@ class SubtitleGenerator @Inject constructor(
 
             send(SubtitleResult.Progress(0.45f))
 
-            val transcript = WhisperContext(modelFile.absolutePath).use { whisper ->
-                whisper.transcribe(wavFile)
+            val transcript = WhisperBridge(modelFile.absolutePath).use { whisper ->
+                whisper.transcribe(wavFile, language = "ko")
             }.trim()
 
             send(SubtitleResult.Progress(0.85f))
