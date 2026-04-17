@@ -122,19 +122,33 @@ Java_com_upcap_pipeline_WhisperBridge_nativeTranscribe(
         return env->NewStringUTF("");
     }
 
-    // Collect all segments
+    // Collect all segments with timestamps as TSV: "t0_ms\tt1_ms\ttext\n"
+    // Whisper segment timestamps are in 10ms units, multiply by 10 for ms.
     int n_segments = p_full_n_segments(ctx);
-    std::string text;
+    std::string out;
     for (int i = 0; i < n_segments; i++) {
         const char *seg = p_full_get_segment_text(ctx, i);
-        if (seg) {
-            text += seg;
-            if (i < n_segments - 1) text += " ";
+        if (!seg) continue;
+
+        int64_t t0_ms = 0, t1_ms = 0;
+        if (p_full_get_segment_t0) t0_ms = p_full_get_segment_t0(ctx, i) * 10;
+        if (p_full_get_segment_t1) t1_ms = p_full_get_segment_t1(ctx, i) * 10;
+
+        // Sanitize: replace any \t or \n in text with space so TSV parses cleanly
+        std::string text(seg);
+        for (char &c : text) {
+            if (c == '\t' || c == '\n' || c == '\r') c = ' ';
         }
+
+        char header[64];
+        snprintf(header, sizeof(header), "%lld\t%lld\t", (long long)t0_ms, (long long)t1_ms);
+        out += header;
+        out += text;
+        out += '\n';
     }
 
-    LOGI("Transcription: %s", text.c_str());
-    return env->NewStringUTF(text.c_str());
+    LOGI("Transcription segments=%d, total chars=%zu", n_segments, out.size());
+    return env->NewStringUTF(out.c_str());
 }
 
 JNIEXPORT void JNICALL

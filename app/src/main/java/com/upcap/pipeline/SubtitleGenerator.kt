@@ -52,20 +52,22 @@ class SubtitleGenerator @Inject constructor(
             send(SubtitleResult.Progress(0.45f))
 
             onLog("Whisper 음성 인식 시작...")
-            val transcript = WhisperBridge(modelFile.absolutePath).use { whisper ->
-                whisper.transcribe(wavFile, language = "ko")
-            }.trim()
-            onLog("음성 인식 완료 (${transcript.length}자)")
+            val rawSegments = WhisperBridge(modelFile.absolutePath).use { whisper ->
+                whisper.transcribeSegments(wavFile, language = "ko")
+            }
+            val totalChars = rawSegments.sumOf { it.text.length }
+            onLog("음성 인식 완료 (${rawSegments.size} 세그먼트, ${totalChars}자)")
 
             send(SubtitleResult.Progress(0.85f))
 
-            // Guard: if transcript has no Korean characters, Whisper likely misidentified the language
-            if (transcript.isNotEmpty() && !transcript.any { it in '\uAC00'..'\uD7A3' || it in '\u3131'..'\u3163' }) {
+            // Guard: if concatenated transcript has no Korean characters, Whisper likely misidentified the language
+            val concatenated = rawSegments.joinToString(" ") { it.text }
+            if (concatenated.isNotEmpty() && !concatenated.any { it in '\uAC00'..'\uD7A3' || it in '\u3131'..'\u3163' }) {
                 send(SubtitleResult.Error("음성 언어를 인식하지 못했습니다. 한국어 음성이 포함된 영상으로 다시 시도해 주세요."))
                 return@channelFlow
             }
 
-            val subtitles = estimateSegmentsFromTranscript(transcript, durationMs)
+            val subtitles = buildSubtitleSegments(rawSegments, durationMs)
             if (subtitles.isEmpty()) {
                 send(SubtitleResult.Error("AI 자막 인식 결과가 비어 있습니다. 음성이 분명한 영상으로 다시 시도해 주세요."))
                 return@channelFlow
@@ -83,39 +85,38 @@ class SubtitleGenerator @Inject constructor(
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun estimateSegmentsFromTranscript(transcript: String, durationMs: Long): List<SubtitleSegment> {
-        val cleaned = transcript.trim()
-        if (cleaned.isEmpty()) {
-            return emptyList()
+    /**
+     * Convert Whisper's native segments (with real timestamps) into display-ready subtitles.
+     * - Wraps long segment text into at most 2 lines of ~16 chars (text-only; timing unchanged).
+     * - Clamps end times to video duration, enforces a minimum on-screen duration.
+     */
+    private fun buildSubtitleSegments(
+        rawSegments: List<WhisperBridge.Segment>,
+        durationMs: Long
+    ): List<SubtitleSegment> {
+        val safeDuration = durationMs.coerceAtLeast(1_000L)
+        val result = mutableListOf<SubtitleSegment>()
+        var idx = 0
+        for (seg in rawSegments) {
+            val text = seg.text.trim()
+            if (text.isEmpty()) continue
+
+            val lines = wrapText(text, maxCharsPerLine = 16, maxLines = 2)
+            val display = lines.joinToString("\n").ifBlank { text }
+
+            val start = seg.startMs.coerceAtLeast(0L).coerceAtMost(safeDuration)
+            val rawEnd = seg.endMs.coerceAtLeast(start + 800L)
+            val end = rawEnd.coerceAtMost(safeDuration)
+            if (end <= start) continue
+
+            result += SubtitleSegment(
+                id = idx++,
+                startMs = start,
+                endMs = end,
+                text = display
+            )
         }
-
-        val chunks = cleaned.split(Regex("(?<=[.!?。！？~])\\s*|(?<=[다요죠까지네세]{1,5})[.，,]?\\s+|\\n+"))
-            .map { it.trim() }
-            .flatMap { wrapText(it, maxCharsPerLine = 16, maxLines = 2) }
-            .filter { it.isNotBlank() }
-            .ifEmpty { listOf(cleaned) }
-
-        val safeDurationMs = durationMs.coerceAtLeast(2_000L)
-        val totalWeight = chunks.sumOf { it.length.coerceAtLeast(1) }
-        var cursorMs = 0L
-
-        return chunks.mapIndexed { index, chunk ->
-            val weight = chunk.length.coerceAtLeast(1)
-            val slice = if (index == chunks.lastIndex) {
-                safeDurationMs - cursorMs
-            } else {
-                (safeDurationMs * weight / totalWeight).coerceAtLeast(1_200L)
-            }
-            val endMs = (cursorMs + slice).coerceAtMost(safeDurationMs)
-            SubtitleSegment(
-                id = index,
-                startMs = cursorMs,
-                endMs = maxOf(endMs, cursorMs + 900).coerceAtMost(safeDurationMs),
-                text = chunk
-            ).also {
-                cursorMs = endMs
-            }
-        }
+        return result
     }
 
     private fun wrapText(text: String, maxCharsPerLine: Int, maxLines: Int): List<String> {

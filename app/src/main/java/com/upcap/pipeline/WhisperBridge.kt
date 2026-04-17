@@ -3,13 +3,14 @@ package com.upcap.pipeline
 import java.io.Closeable
 import java.io.File
 import java.io.RandomAccessFile
-import java.nio.ByteOrder
 
 /**
  * JNI bridge to whisper.cpp with language parameter support.
  * Bypasses the mx.valdora WhisperLib which hardcodes language to "es".
  */
 class WhisperBridge(modelPath: String) : Closeable {
+
+    data class Segment(val startMs: Long, val endMs: Long, val text: String)
 
     private var contextPtr: Long = nativeInit(modelPath)
 
@@ -19,10 +20,26 @@ class WhisperBridge(modelPath: String) : Closeable {
         }
     }
 
-    fun transcribe(wavFile: File, language: String = "ko"): String {
+    /**
+     * Returns parsed segments with real Whisper timestamps.
+     * Native layer emits TSV: "t0_ms\tt1_ms\ttext\n" per segment.
+     */
+    fun transcribeSegments(wavFile: File, language: String = "ko"): List<Segment> {
         val audio = readWavToFloatArray(wavFile)
-        if (audio.isEmpty()) return ""
-        return nativeTranscribe(contextPtr, audio, language)
+        if (audio.isEmpty()) return emptyList()
+        val raw = nativeTranscribe(contextPtr, audio, language)
+        if (raw.isEmpty()) return emptyList()
+
+        return raw.split('\n')
+            .mapNotNull { line ->
+                if (line.isBlank()) return@mapNotNull null
+                val parts = line.split('\t', limit = 3)
+                if (parts.size < 3) return@mapNotNull null
+                val t0 = parts[0].toLongOrNull() ?: return@mapNotNull null
+                val t1 = parts[1].toLongOrNull() ?: return@mapNotNull null
+                val text = parts[2].trim()
+                if (text.isEmpty()) null else Segment(t0, t1, text)
+            }
     }
 
     override fun close() {

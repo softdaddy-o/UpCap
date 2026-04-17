@@ -250,18 +250,22 @@ class AiQualityPipeline @Inject constructor(
                                         decoder.releaseOutputBuffer(outputIndex, false)
 
                                         if (framesProcessed == 0L) {
-                                            onLog("첫 번째 프레임 AI 처리 시작...")
+                                            onLog("첫 번째 프레임 AI 처리 시작 (${frameBitmap.width}x${frameBitmap.height}, tile=$tileSize)...")
                                         }
 
                                         // Tile-based super-resolution with sub-frame progress
+                                        val frameStartMs = System.currentTimeMillis()
                                         val enhanced = enhanceFrame(
                                             frameBitmap, env, session,
-                                            tileSize, tileOverlap, tileStride
+                                            tileSize, tileOverlap, tileStride,
+                                            onLog = if (framesProcessed == 0L) onLog else { _ -> }
                                         ) { tilesDone, totalTiles ->
                                             val subProgress = (framesProcessed.toFloat() + tilesDone.toFloat() / totalTiles) / totalFrames
                                             onProgress(subProgress.coerceAtMost(1f))
-                                            if (tilesDone % 20 == 0 || tilesDone == totalTiles) {
-                                                onLog("프레임 ${framesProcessed + 1}/$totalFrames · 타일 $tilesDone/$totalTiles")
+                                            val firstFrameEarly = framesProcessed == 0L && (tilesDone == 1 || tilesDone == 5)
+                                            if (firstFrameEarly || tilesDone % 20 == 0 || tilesDone == totalTiles) {
+                                                val elapsed = System.currentTimeMillis() - frameStartMs
+                                                onLog("프레임 ${framesProcessed + 1}/$totalFrames · 타일 $tilesDone/$totalTiles (${elapsed}ms)")
                                             }
                                         }
                                         frameBitmap.recycle()
@@ -435,6 +439,7 @@ class AiQualityPipeline @Inject constructor(
         tileSize: Int,
         tileOverlap: Int,
         tileStride: Int,
+        onLog: (String) -> Unit = { _ -> },
         onTileProgress: (tilesDone: Int, totalTiles: Int) -> Unit = { _, _ -> }
     ): Bitmap {
         val w = frame.width
@@ -460,6 +465,7 @@ class AiQualityPipeline @Inject constructor(
         val tilesY = ceilDiv(h, tileStride)
         val totalTiles = tilesX * tilesY
         var tilesDone = 0
+        onLog("enhanceFrame 진입: ${w}x${h}, 타일 ${totalTiles}개 (stride=$tileStride, overlap=$tileOverlap)")
 
         for (ty in 0 until tilesY) {
             for (tx in 0 until tilesX) {
@@ -473,7 +479,13 @@ class AiQualityPipeline @Inject constructor(
 
                 val tilePixels = extractTile(srcPixels, w, h, srcLeft, srcTop, tileSize)
 
+                if (tilesDone == 0) onLog("첫 타일 session.run 시작 (ONNX 컴파일/NNAPI 파티셔닝 발생 가능)")
+                val tileStartMs = System.currentTimeMillis()
                 val srPixels = processTile(tilePixels, env, session, tileSize)
+                if (tilesDone == 0) {
+                    val elapsed = System.currentTimeMillis() - tileStartMs
+                    onLog("첫 타일 session.run 완료 (${elapsed}ms)")
+                }
                 val srSize = tileSize * SCALE
 
                 val padLeft = outLeft - srcLeft
