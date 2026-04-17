@@ -11,6 +11,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.upcap.model.ProcessingMode
 import com.upcap.model.ProcessingState
+import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import com.upcap.service.ProcessingService
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -64,12 +65,22 @@ class ProcessingViewModel @Inject constructor(
         }
     }
 
-    fun startProcessing(videoUri: String, mode: ProcessingMode, preset: QualityPreset) {
+    fun startProcessing(
+        videoUri: String,
+        mode: ProcessingMode,
+        preset: QualityPreset,
+        qualityModel: QualityModel = QualityModel.MOBILE_V3,
+        sharpen: Boolean = false,
+        denoise: Boolean = false
+    ) {
         val uri = Uri.parse(java.net.URLDecoder.decode(videoUri, "UTF-8"))
         val intent = Intent(context, ProcessingService::class.java).apply {
             putExtra(ProcessingService.EXTRA_VIDEO_URI, uri.toString())
             putExtra(ProcessingService.EXTRA_MODE, mode.name)
             putExtra(ProcessingService.EXTRA_PRESET, preset.name)
+            putExtra(ProcessingService.EXTRA_MODEL, qualityModel.name)
+            putExtra(ProcessingService.EXTRA_SHARPEN, sharpen)
+            putExtra(ProcessingService.EXTRA_DENOISE, denoise)
         }
         context.startForegroundService(intent)
         context.bindService(intent, connection, Context.BIND_AUTO_CREATE)

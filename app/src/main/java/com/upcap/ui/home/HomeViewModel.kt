@@ -10,6 +10,7 @@ import com.upcap.pipeline.AiModelKind
 import com.upcap.pipeline.ModelAssetManager
 import com.upcap.pipeline.ModelDownloadStatus
 import com.upcap.model.ProcessingMode
+import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import com.upcap.model.VideoInfo
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -35,6 +36,15 @@ class HomeViewModel @Inject constructor(
 
     private val _selectedPreset = MutableStateFlow(QualityPreset.BALANCED)
     val selectedPreset: StateFlow<QualityPreset> = _selectedPreset
+
+    private val _selectedModel = MutableStateFlow(QualityModel.MOBILE_V3)
+    val selectedModel: StateFlow<QualityModel> = _selectedModel
+
+    private val _sharpenEnabled = MutableStateFlow(false)
+    val sharpenEnabled: StateFlow<Boolean> = _sharpenEnabled
+
+    private val _denoiseEnabled = MutableStateFlow(false)
+    val denoiseEnabled: StateFlow<Boolean> = _denoiseEnabled
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
@@ -130,6 +140,19 @@ class HomeViewModel @Inject constructor(
         _selectedPreset.value = preset
     }
 
+    fun selectModel(model: QualityModel) {
+        _selectedModel.value = model
+        modelAssetManager.refreshQualityStatus(model)
+    }
+
+    fun setSharpen(enabled: Boolean) {
+        _sharpenEnabled.value = enabled
+    }
+
+    fun setDenoise(enabled: Boolean) {
+        _denoiseEnabled.value = enabled
+    }
+
     fun clearError() {
         _errorMessage.value = null
     }
@@ -148,6 +171,16 @@ class HomeViewModel @Inject constructor(
                 modelAssetManager.download(kind, force = false)
             }.onFailure {
                 _errorMessage.value = "${kind.label} 다운로드 실패: ${it.message ?: "알 수 없는 오류"}"
+            }
+        }
+    }
+
+    fun downloadQualityModel() {
+        viewModelScope.launch {
+            runCatching {
+                modelAssetManager.downloadForModel(_selectedModel.value)
+            }.onFailure {
+                _errorMessage.value = "${_selectedModel.value.label} 다운로드 실패: ${it.message ?: "알 수 없는 오류"}"
             }
         }
     }

@@ -7,6 +7,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.upcap.model.ProcessingMode
+import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import com.upcap.ui.editor.EditorScreen
 import com.upcap.ui.editor.EditorSessionStore
@@ -16,12 +17,19 @@ import com.upcap.ui.processing.ProcessingScreen
 
 object Routes {
     const val HOME = "home"
-    const val PROCESSING = "processing/{videoUri}/{mode}/{preset}"
+    const val PROCESSING = "processing/{videoUri}/{mode}/{preset}/{model}/{sharpen}/{denoise}"
     const val EDITOR = "editor/{outputPath}"
     const val PREVIEW = "preview/{outputPath}"
 
-    fun processing(videoUri: String, mode: ProcessingMode, preset: QualityPreset): String {
-        return "processing/$videoUri/${mode.name}/${preset.name}"
+    fun processing(
+        videoUri: String,
+        mode: ProcessingMode,
+        preset: QualityPreset,
+        model: QualityModel,
+        sharpen: Boolean,
+        denoise: Boolean
+    ): String {
+        return "processing/$videoUri/${mode.name}/${preset.name}/${model.name}/$sharpen/$denoise"
     }
 
     fun editor(outputPath: String): String {
@@ -38,9 +46,9 @@ fun UpCapNavGraph(navController: NavHostController) {
     NavHost(navController = navController, startDestination = Routes.HOME) {
         composable(Routes.HOME) {
             HomeScreen(
-                onStartProcessing = { videoUri, mode, preset ->
+                onStartProcessing = { videoUri, mode, preset, model, sharpen, denoise ->
                     val encodedUri = java.net.URLEncoder.encode(videoUri.toString(), "UTF-8")
-                    navController.navigate(Routes.processing(encodedUri, mode, preset))
+                    navController.navigate(Routes.processing(encodedUri, mode, preset, model, sharpen, denoise))
                 }
             )
         }
@@ -50,19 +58,29 @@ fun UpCapNavGraph(navController: NavHostController) {
             arguments = listOf(
                 navArgument("videoUri") { type = NavType.StringType },
                 navArgument("mode") { type = NavType.StringType },
-                navArgument("preset") { type = NavType.StringType }
+                navArgument("preset") { type = NavType.StringType },
+                navArgument("model") { type = NavType.StringType },
+                navArgument("sharpen") { type = NavType.StringType },
+                navArgument("denoise") { type = NavType.StringType }
             )
         ) { backStackEntry ->
             val encodedUri = backStackEntry.arguments?.getString("videoUri") ?: return@composable
             val modeName = backStackEntry.arguments?.getString("mode") ?: return@composable
             val presetName = backStackEntry.arguments?.getString("preset") ?: QualityPreset.BALANCED.name
+            val modelName = backStackEntry.arguments?.getString("model") ?: QualityModel.MOBILE_V3.name
+            val sharpen = backStackEntry.arguments?.getString("sharpen")?.toBooleanStrictOrNull() ?: false
+            val denoise = backStackEntry.arguments?.getString("denoise")?.toBooleanStrictOrNull() ?: false
             val mode = ProcessingMode.valueOf(modeName)
             val preset = QualityPreset.valueOf(presetName)
+            val model = QualityModel.valueOf(modelName)
 
             ProcessingScreen(
                 videoUri = encodedUri,
                 mode = mode,
                 preset = preset,
+                qualityModel = model,
+                sharpen = sharpen,
+                denoise = denoise,
                 onCompleted = { outputPath, subtitles ->
                     val encodedPath = java.net.URLEncoder.encode(outputPath, "UTF-8")
                     if (!subtitles.isNullOrEmpty()) {

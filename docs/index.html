@@ -218,6 +218,27 @@
         box-shadow: 0 12px 40px rgba(16, 24, 39, 0.16);
       }
 
+      .version-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 14px;
+        padding: 6px 14px;
+        border: 1px solid rgba(15, 118, 110, 0.18);
+        border-radius: 999px;
+        background: rgba(240, 253, 250, 0.7);
+        color: var(--accent-dark);
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .version-badge .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+
       code {
         padding: 2px 6px;
         border-radius: 8px;
@@ -267,6 +288,10 @@
             이 페이지는 항상 최신 debug APK로 연결됩니다. 개발 PC에 휴대폰을 연결하지 않아도
             링크를 열어 설치하고 모델 다운로드 상태를 확인할 수 있습니다.
           </p>
+          <div class="version-badge" id="version-info">
+            <span class="dot"></span>
+            <span id="version-text">버전 확인 중...</span>
+          </div>
           <div class="actions">
             <a class="button" href="https://github.com/softdaddy-o/UpCap/releases/download/debug-apk-latest/app-debug.apk">
               최신 APK 다운로드
@@ -291,7 +316,7 @@
               </li>
               <li class="step">
                 <span class="num">3</span>
-                <span><strong>앱 실행 후 모델 다운로드</strong>화질 모델은 약 64MB, 자막 모델은 약 142MB입니다. 두 모델이 <code>준비됨</code>이 되는지 확인합니다.</span>
+                <span><strong>앱 실행 후 모델 다운로드</strong>화질 모델은 약 5MB, 자막 모델은 약 142MB입니다. 두 모델이 <code>준비됨</code>이 되는지 확인합니다.</span>
               </li>
               <li class="step">
                 <span class="num">4</span>
@@ -321,5 +346,23 @@
         </section>
       </div>
     </main>
+    <script>
+      fetch("https://api.github.com/repos/softdaddy-o/UpCap/releases/tags/debug-apk-latest")
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var el = document.getElementById("version-text");
+          if (data.name) {
+            var date = data.published_at
+              ? new Date(data.published_at).toLocaleDateString("ko-KR")
+              : "";
+            el.textContent = data.name + (date ? " · " + date : "");
+          } else {
+            el.textContent = "버전 정보를 불러올 수 없습니다";
+          }
+        })
+        .catch(function () {
+          document.getElementById("version-text").textContent = "버전 정보를 불러올 수 없습니다";
+        });
+    </script>
   </body>
 </html>

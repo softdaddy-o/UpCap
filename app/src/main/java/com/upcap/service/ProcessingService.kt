@@ -12,6 +12,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.upcap.model.ProcessingMode
 import com.upcap.model.ProcessingState
+import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import com.upcap.model.SubtitleSegment
 import com.upcap.pipeline.AiQualityPipeline
@@ -78,15 +79,26 @@ class ProcessingService : Service() {
         val mode = ProcessingMode.entries.firstOrNull { it.name == modeName } ?: return START_NOT_STICKY
         val presetName = intent.getStringExtra(EXTRA_PRESET) ?: QualityPreset.BALANCED.name
         val preset = QualityPreset.entries.firstOrNull { it.name == presetName } ?: QualityPreset.BALANCED
+        val modelName = intent.getStringExtra(EXTRA_MODEL) ?: QualityModel.MOBILE_V3.name
+        val qualityModel = QualityModel.entries.firstOrNull { it.name == modelName } ?: QualityModel.MOBILE_V3
+        val sharpen = intent.getBooleanExtra(EXTRA_SHARPEN, false)
+        val denoise = intent.getBooleanExtra(EXTRA_DENOISE, false)
         val videoUri = Uri.parse(videoUriStr)
 
         startForeground(NOTIFICATION_ID, createNotification("준비 중...", 0))
-        startProcessing(videoUri, mode, preset)
+        startProcessing(videoUri, mode, preset, qualityModel, sharpen, denoise)
 
         return START_NOT_STICKY
     }
 
-    private fun startProcessing(videoUri: Uri, mode: ProcessingMode, preset: QualityPreset) {
+    private fun startProcessing(
+        videoUri: Uri,
+        mode: ProcessingMode,
+        preset: QualityPreset,
+        qualityModel: QualityModel = QualityModel.MOBILE_V3,
+        sharpen: Boolean = false,
+        denoise: Boolean = false
+    ) {
         processingJob = scope.launch {
             try {
                 var currentVideoPath: String? = null
@@ -102,6 +114,9 @@ class ProcessingService : Service() {
                     var qualityFailed = false
                     aiQualityPipeline.enhance(
                         videoUri, outputDir, preset,
+                        qualityModel = qualityModel,
+                        sharpen = sharpen,
+                        denoise = denoise,
                         onLog = { msg -> log(msg) },
                         onPreview = { bitmap -> _previewFrame.value = bitmap }
                     ).collect { result ->
@@ -256,6 +271,9 @@ class ProcessingService : Service() {
         const val EXTRA_VIDEO_URI = "extra_video_uri"
         const val EXTRA_MODE = "extra_mode"
         const val EXTRA_PRESET = "extra_preset"
+        const val EXTRA_MODEL = "extra_model"
+        const val EXTRA_SHARPEN = "extra_sharpen"
+        const val EXTRA_DENOISE = "extra_denoise"
         const val CHANNEL_ID = "processing_channel"
         const val NOTIFICATION_ID = 1001
     }

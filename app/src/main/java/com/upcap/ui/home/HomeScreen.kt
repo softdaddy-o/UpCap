@@ -49,6 +49,7 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -71,6 +72,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
 import com.upcap.BuildConfig
 import com.upcap.model.ProcessingMode
+import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import com.upcap.pipeline.AiModelKind
 import com.upcap.pipeline.ModelDownloadStatus
@@ -79,13 +81,16 @@ import com.upcap.pipeline.ModelState
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
-    onStartProcessing: (Uri, ProcessingMode, QualityPreset) -> Unit,
+    onStartProcessing: (Uri, ProcessingMode, QualityPreset, QualityModel, Boolean, Boolean) -> Unit,
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     val videoInfo by viewModel.videoInfo.collectAsState()
     val selectedMode by viewModel.selectedMode.collectAsState()
     val selectedPreset by viewModel.selectedPreset.collectAsState()
+    val selectedModel by viewModel.selectedModel.collectAsState()
+    val sharpenEnabled by viewModel.sharpenEnabled.collectAsState()
+    val denoiseEnabled by viewModel.denoiseEnabled.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val qualityModelStatus by viewModel.qualityModelStatus.collectAsState()
     val subtitleModelStatus by viewModel.subtitleModelStatus.collectAsState()
@@ -204,7 +209,7 @@ fun HomeScreen(
                                 viewModel.setError("선택한 처리 모드에 필요한 AI 모델을 다운로드해 주세요.")
                                 return@Button
                             }
-                            videoInfo?.let { onStartProcessing(it.uri, selectedMode, selectedPreset) }
+                            videoInfo?.let { onStartProcessing(it.uri, selectedMode, selectedPreset, selectedModel, sharpenEnabled, denoiseEnabled) }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -353,10 +358,10 @@ fun HomeScreen(
                 ModelStatusCard(
                     status = qualityModelStatus,
                     icon = Icons.Default.AutoAwesome,
-                    description = "Real-ESRGAN 기반 고품질 영상 분석 모델"
+                    description = "${selectedModel.label} (${selectedModel.sizeLabel})"
                 ) {
                     viewModel.clearError()
-                    viewModel.downloadModel(AiModelKind.QUALITY)
+                    viewModel.downloadQualityModel()
                 }
 
                 ModelStatusCard(
@@ -433,6 +438,88 @@ fun HomeScreen(
                         )
                     }
                 }
+
+                Text(
+                    text = "후처리 옵션",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "샤프닝",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "언샤프 마스크로 선명도를 높입니다",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = sharpenEnabled,
+                                onCheckedChange = { viewModel.setSharpen(it) }
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "노이즈 제거",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "블러 필터로 노이즈를 줄입니다",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = denoiseEnabled,
+                                onCheckedChange = { viewModel.setDenoise(it) }
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "AI 모델 선택",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    QualityModel.entries.forEach { model ->
+                        ModelSelectCard(
+                            model = model,
+                            isSelected = selectedModel == model,
+                            onClick = { viewModel.selectModel(model) }
+                        )
+                    }
+                }
             }
 
             if (allModelsReady) {
@@ -445,10 +532,10 @@ fun HomeScreen(
                 ModelStatusCard(
                     status = qualityModelStatus,
                     icon = Icons.Default.AutoAwesome,
-                    description = "Real-ESRGAN 기반 고품질 영상 분석 모델"
+                    description = "${selectedModel.label} (${selectedModel.sizeLabel})"
                 ) {
                     viewModel.clearError()
-                    viewModel.downloadModel(AiModelKind.QUALITY)
+                    viewModel.downloadQualityModel()
                 }
 
                 ModelStatusCard(
@@ -682,6 +769,62 @@ private fun ModeCard(
                     text = description,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            RadioButton(selected = isSelected, onClick = null)
+        }
+    }
+}
+
+@Composable
+private fun ModelSelectCard(
+    model: QualityModel,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    val borderColor by animateColorAsState(
+        targetValue = if (isSelected) MaterialTheme.colorScheme.secondary
+        else MaterialTheme.colorScheme.surfaceVariant,
+        label = "model_border"
+    )
+    val containerColor by animateColorAsState(
+        targetValue = if (isSelected) MaterialTheme.colorScheme.secondary.copy(alpha = 0.08f)
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        label = "model_container"
+    )
+
+    OutlinedCard(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(
+            width = if (isSelected) 2.dp else 1.dp,
+            color = borderColor
+        ),
+        colors = CardDefaults.outlinedCardColors(containerColor = containerColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = model.label,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                )
+                Text(
+                    text = model.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = model.sizeLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                 )
             }
             RadioButton(selected = isSelected, onClick = null)

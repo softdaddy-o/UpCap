@@ -15,6 +15,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -33,6 +34,9 @@ class AiQualityPipeline @Inject constructor(
         videoUri: Uri,
         outputDir: File,
         preset: QualityPreset = QualityPreset.BALANCED,
+        qualityModel: QualityModel = QualityModel.MOBILE_V3,
+        sharpen: Boolean = false,
+        denoise: Boolean = false,
         onLog: (String) -> Unit = {},
         onPreview: (Bitmap) -> Unit = {}
     ): Flow<QualityResult> = channelFlow {
@@ -42,18 +46,19 @@ class AiQualityPipeline @Inject constructor(
         try {
             send(QualityResult.Progress(0.05f))
             onLog("영상 파일 복사 완료")
-            onLog("품질 프리셋: ${preset.label} (타일 ${preset.tileSize}px)")
+            onLog("품질 프리셋: ${preset.label} (타일 ${QualityPreset.MODEL_TILE_SIZE}px, 겹침 ${preset.tileOverlap}px)")
+            onLog("모델: ${qualityModel.label}, 샤프닝: ${if (sharpen) "켜짐" else "꺼짐"}, 노이즈 제거: ${if (denoise) "켜짐" else "꺼짐"}")
 
             onLog("AI 화질 모델 준비 중...")
             val modelFile = ModelAssetManager.getInstance(context)
-                .ensureAvailable(AiModelKind.QUALITY) { progress ->
+                .ensureQualityModelAvailable(qualityModel) { progress ->
                     trySend(QualityResult.Progress(0.05f + progress * 0.15f))
                 }
             onLog("AI 화질 모델 준비 완료")
 
             send(QualityResult.Progress(0.20f))
 
-            processVideo(inputPath, outputPath, modelFile, preset, onLog, onPreview) { progress ->
+            processVideo(inputPath, outputPath, modelFile, preset, sharpen, denoise, onLog, onPreview) { progress ->
                 trySend(QualityResult.Progress(0.20f + progress * 0.75f))
             }
 
@@ -74,6 +79,8 @@ class AiQualityPipeline @Inject constructor(
         outputPath: String,
         modelFile: File,
         preset: QualityPreset,
+        sharpen: Boolean,
+        denoise: Boolean,
         onLog: (String) -> Unit,
         onPreview: (Bitmap) -> Unit,
         onProgress: (Float) -> Unit
@@ -96,6 +103,9 @@ class AiQualityPipeline @Inject constructor(
 
         onLog("AI 모델 세션 로딩 중...")
         env.createSession(modelFile.absolutePath, sessionOptions).use { session ->
+            val inputInfo = session.inputInfo.entries.joinToString { "${it.key}: ${(it.value.info as? ai.onnxruntime.TensorInfo)?.shape?.contentToString() ?: "?"}" }
+            val outputInfo = session.outputInfo.entries.joinToString { "${it.key}: ${(it.value.info as? ai.onnxruntime.TensorInfo)?.shape?.contentToString() ?: "?"}" }
+            onLog("모델 입력: [$inputInfo] / 출력: [$outputInfo]")
             onLog("AI 모델 세션 로딩 완료 (최적화: ALL_OPT)")
             val videoExtractor = MediaExtractor()
             val audioExtractor = MediaExtractor()
@@ -119,7 +129,7 @@ class AiQualityPipeline @Inject constructor(
                     (durationUs / 1_000_000.0 * frameRate).toLong().coerceAtLeast(1)
                 } else 1L
 
-                val tileSize = preset.tileSize
+                val tileSize = QualityPreset.MODEL_TILE_SIZE
                 val tileOverlap = preset.tileOverlap
                 val tileStride = preset.tileStride
                 val tilesPerFrame = ceilDiv(width, tileStride) * ceilDiv(height, tileStride)
@@ -250,14 +260,31 @@ class AiQualityPipeline @Inject constructor(
                                         ) { tilesDone, totalTiles ->
                                             val subProgress = (framesProcessed.toFloat() + tilesDone.toFloat() / totalTiles) / totalFrames
                                             onProgress(subProgress.coerceAtMost(1f))
+                                            if (tilesDone % 20 == 0 || tilesDone == totalTiles) {
+                                                onLog("프레임 ${framesProcessed + 1}/$totalFrames · 타일 $tilesDone/$totalTiles")
+                                            }
                                         }
                                         frameBitmap.recycle()
 
+                                        // Post-processing: denoise then sharpen
+                                        var postProcessed = enhanced
+                                        if (denoise) {
+                                            val denoised = denoiseBitmap(postProcessed)
+                                            if (postProcessed !== enhanced) postProcessed.recycle()
+                                            postProcessed = denoised
+                                        }
+                                        if (sharpen) {
+                                            val sharpened = sharpenBitmap(postProcessed)
+                                            if (postProcessed !== enhanced && postProcessed !== sharpened) postProcessed.recycle()
+                                            postProcessed = sharpened
+                                        }
+
                                         // Emit preview (copy so encoder can consume original)
-                                        onPreview(enhanced.copy(enhanced.config, false))
+                                        onPreview(postProcessed.copy(postProcessed.config, false))
 
                                         // Feed enhanced frame to encoder
-                                        feedFrameToEncoder(enhanced, encoder, pts)
+                                        feedFrameToEncoder(postProcessed, encoder, pts)
+                                        if (postProcessed !== enhanced) postProcessed.recycle()
                                         enhanced.recycle()
 
                                         framesProcessed++
@@ -677,6 +704,71 @@ class AiQualityPipeline @Inject constructor(
                 buffer.put((128 + 224 * cr).toInt().coerceIn(16, 240).toByte())
             }
         }
+    }
+
+    // ── Post-processing: sharpening & denoising ───────────────────────
+
+    private fun sharpenBitmap(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        val pixels = IntArray(w * h)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+        val out = IntArray(w * h)
+
+        // Unsharp mask: kernel  [0, -1, 0, -1, 5, -1, 0, -1, 0]
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                if (x == 0 || y == 0 || x == w - 1 || y == h - 1) {
+                    out[y * w + x] = pixels[y * w + x]
+                    continue
+                }
+                val c = pixels[y * w + x]
+                val t = pixels[(y - 1) * w + x]
+                val b = pixels[(y + 1) * w + x]
+                val l = pixels[y * w + (x - 1)]
+                val r = pixels[y * w + (x + 1)]
+
+                val sr = (5 * ((c shr 16) and 0xFF) - ((t shr 16) and 0xFF) - ((b shr 16) and 0xFF) - ((l shr 16) and 0xFF) - ((r shr 16) and 0xFF)).coerceIn(0, 255)
+                val sg = (5 * ((c shr 8) and 0xFF) - ((t shr 8) and 0xFF) - ((b shr 8) and 0xFF) - ((l shr 8) and 0xFF) - ((r shr 8) and 0xFF)).coerceIn(0, 255)
+                val sb = (5 * (c and 0xFF) - (t and 0xFF) - (b and 0xFF) - (l and 0xFF) - (r and 0xFF)).coerceIn(0, 255)
+
+                out[y * w + x] = (0xFF shl 24) or (sr shl 16) or (sg shl 8) or sb
+            }
+        }
+
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun denoiseBitmap(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        val pixels = IntArray(w * h)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+        val out = IntArray(w * h)
+
+        // 3x3 box blur for lightweight noise reduction
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var sumR = 0; var sumG = 0; var sumB = 0; var count = 0
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
+                        val ny = (y + dy).coerceIn(0, h - 1)
+                        val nx = (x + dx).coerceIn(0, w - 1)
+                        val p = pixels[ny * w + nx]
+                        sumR += (p shr 16) and 0xFF
+                        sumG += (p shr 8) and 0xFF
+                        sumB += p and 0xFF
+                        count++
+                    }
+                }
+                out[y * w + x] = (0xFF shl 24) or
+                    ((sumR / count) shl 16) or
+                    ((sumG / count) shl 8) or
+                    (sumB / count)
+            }
+        }
+
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────

@@ -89,7 +89,7 @@ class SubtitleGenerator @Inject constructor(
             return emptyList()
         }
 
-        val chunks = cleaned.split(Regex("(?<=[.!?。！？~])[\\s]*|(?<=[다요죠까지네세]+)[.，,]?\\s+|\\n+"))
+        val chunks = cleaned.split(Regex("(?<=[.!?。！？~])\\s*|(?<=[다요죠까지네세]{1,5})[.，,]?\\s+|\\n+"))
             .map { it.trim() }
             .flatMap { wrapText(it, maxCharsPerLine = 16, maxLines = 2) }
             .filter { it.isNotBlank() }

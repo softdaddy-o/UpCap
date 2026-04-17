@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.upcap.model.ProcessingMode
 import com.upcap.model.ProcessingState
+import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import com.upcap.model.SubtitleSegment
 
@@ -71,6 +72,9 @@ fun ProcessingScreen(
     videoUri: String,
     mode: ProcessingMode,
     preset: QualityPreset,
+    qualityModel: QualityModel = QualityModel.MOBILE_V3,
+    sharpen: Boolean = false,
+    denoise: Boolean = false,
     onCompleted: (outputPath: String, subtitles: List<SubtitleSegment>?) -> Unit,
     onCancel: () -> Unit,
     viewModel: ProcessingViewModel = hiltViewModel()
@@ -79,8 +83,8 @@ fun ProcessingScreen(
     val logs by viewModel.logs.collectAsState()
     val previewFrame by viewModel.previewFrame.collectAsState()
 
-    LaunchedEffect(videoUri, mode, preset) {
-        viewModel.startProcessing(videoUri, mode, preset)
+    LaunchedEffect(videoUri, mode, preset, qualityModel, sharpen, denoise) {
+        viewModel.startProcessing(videoUri, mode, preset, qualityModel, sharpen, denoise)
     }
 
     LaunchedEffect(state) {
@@ -107,10 +111,17 @@ fun ProcessingScreen(
                 ProgressHeader(progress = 0f, title = "준비 중...", subtitle = "")
             }
             is ProcessingState.EnhancingQuality -> {
+                val lastTileLog = logs.lastOrNull { it.contains("타일") } ?: ""
+                val tileDetail = Regex("프레임 (\\S+) · 타일 (\\S+)").find(lastTileLog)
+                val subtitle = if (tileDetail != null) {
+                    "프레임 ${tileDetail.groupValues[1]} · 타일 ${tileDetail.groupValues[2]}"
+                } else {
+                    "프레임을 분석해 장면별 보정 프로필을 적용하고 있습니다"
+                }
                 ProgressHeader(
                     progress = current.progress,
                     title = "AI 화질 개선 중",
-                    subtitle = "프레임을 분석해 장면별 보정 프로필을 적용하고 있습니다"
+                    subtitle = subtitle
                 )
             }
             is ProcessingState.GeneratingSubtitles -> {
