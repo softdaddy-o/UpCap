@@ -36,7 +36,12 @@ class ModelAssetManager private constructor(
 
     fun refreshQualityStatus(model: QualityModel) {
         val file = File(modelDir, model.fileName)
-        _qualityStatus.value = if (file.exists() && file.length() >= model.minimumBytes) {
+        val ready = if (model.isArchived) {
+            file.exists() && modelDir.listFiles()?.any { it.name.endsWith(".data") } == true
+        } else {
+            file.exists() && file.length() >= model.minimumBytes
+        }
+        _qualityStatus.value = if (ready) {
             ModelDownloadStatus(
                 kind = AiModelKind.QUALITY,
                 state = ModelState.READY,
@@ -82,7 +87,12 @@ class ModelAssetManager private constructor(
     suspend fun ensureQualityModelAvailable(model: QualityModel, onProgress: (Float) -> Unit): File {
         return qualityMutex.withLock {
             val file = File(modelDir, model.fileName)
-            if (file.exists() && file.length() >= model.minimumBytes) {
+            val ready = if (model.isArchived) {
+                file.exists() && modelDir.listFiles()?.any { it.name.endsWith(".data") } == true
+            } else {
+                file.exists() && file.length() >= model.minimumBytes
+            }
+            if (ready) {
                 onProgress(1f)
                 return@withLock file
             }
@@ -104,11 +114,25 @@ class ModelAssetManager private constructor(
             localBytes = 0L
         )
 
-        val connection = URL(model.url).openConnection() as HttpURLConnection
+        var connection = URL(model.url).openConnection() as HttpURLConnection
         connection.connectTimeout = 30_000
         connection.readTimeout = 30_000
+        connection.instanceFollowRedirects = true
         connection.requestMethod = "GET"
         connection.connect()
+
+        // Follow redirects manually (cross-protocol redirects like https→http)
+        var redirectCount = 0
+        while (connection.responseCode in 301..303 || connection.responseCode == 307 || connection.responseCode == 308) {
+            if (++redirectCount > 5) break
+            val redirectUrl = connection.getHeaderField("Location") ?: break
+            connection.disconnect()
+            connection = URL(redirectUrl).openConnection() as HttpURLConnection
+            connection.connectTimeout = 30_000
+            connection.readTimeout = 30_000
+            connection.instanceFollowRedirects = true
+            connection.connect()
+        }
 
         if (connection.responseCode !in 200..299) {
             _qualityStatus.value = ModelDownloadStatus(
@@ -148,7 +172,12 @@ class ModelAssetManager private constructor(
             downloadTarget.delete()
         }
 
-        if (!file.exists() || file.length() < model.minimumBytes) {
+        val verified = if (model.isArchived) {
+            file.exists() && modelDir.listFiles()?.any { it.name.endsWith(".data") } == true
+        } else {
+            file.exists() && file.length() >= model.minimumBytes
+        }
+        if (!verified) {
             _qualityStatus.value = ModelDownloadStatus(
                 kind = AiModelKind.QUALITY,
                 state = ModelState.FAILED,
@@ -191,11 +220,25 @@ class ModelAssetManager private constructor(
 
         val downloadTarget = if (kind.isArchived) File(modelDir, "${kind.fileName}.download.zip") else file
 
-        val connection = URL(kind.url).openConnection() as HttpURLConnection
+        var connection = URL(kind.url).openConnection() as HttpURLConnection
         connection.connectTimeout = 30_000
         connection.readTimeout = 30_000
+        connection.instanceFollowRedirects = true
         connection.requestMethod = "GET"
         connection.connect()
+
+        // Follow redirects manually (cross-protocol redirects like https→http)
+        var redirectCount = 0
+        while (connection.responseCode in 301..303 || connection.responseCode == 307 || connection.responseCode == 308) {
+            if (++redirectCount > 5) break
+            val redirectUrl = connection.getHeaderField("Location") ?: break
+            connection.disconnect()
+            connection = URL(redirectUrl).openConnection() as HttpURLConnection
+            connection.connectTimeout = 30_000
+            connection.readTimeout = 30_000
+            connection.instanceFollowRedirects = true
+            connection.connect()
+        }
 
         if (connection.responseCode !in 200..299) {
             val failed = ModelDownloadStatus(
@@ -262,24 +305,38 @@ class ModelAssetManager private constructor(
     }
 
     private fun extractOnnxFromZip(zipFile: File, targetFile: File) {
+        val targetDir = targetFile.parentFile!!
+        var foundOnnx = false
         ZipInputStream(zipFile.inputStream()).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
-                if (!entry.isDirectory && entry.name.endsWith(".onnx")) {
-                    FileOutputStream(targetFile).use { out ->
-                        zis.copyTo(out)
+                if (!entry.isDirectory) {
+                    val fileName = entry.name.substringAfterLast('/')
+                    when {
+                        fileName.endsWith(".onnx") -> {
+                            FileOutputStream(targetFile).use { out -> zis.copyTo(out) }
+                            foundOnnx = true
+                        }
+                        fileName.endsWith(".data") -> {
+                            FileOutputStream(File(targetDir, fileName)).use { out -> zis.copyTo(out) }
+                        }
                     }
-                    return
                 }
                 entry = zis.nextEntry
             }
         }
-        throw IllegalStateException("ZIP 파일에서 ONNX 모델을 찾지 못했습니다")
+        if (!foundOnnx) throw IllegalStateException("ZIP 파일에서 ONNX 모델을 찾지 못했습니다")
     }
 
     private fun checkStatus(kind: AiModelKind): ModelDownloadStatus {
         val file = modelFile(kind)
-        return if (file.exists() && file.length() >= kind.minimumBytes) {
+        val ready = if (kind.isArchived) {
+            // Archived models have external data: .onnx + .data file
+            file.exists() && modelDir.listFiles()?.any { it.name.endsWith(".data") } == true
+        } else {
+            file.exists() && file.length() >= kind.minimumBytes
+        }
+        return if (ready) {
             ModelDownloadStatus(
                 kind = kind,
                 state = ModelState.READY,
