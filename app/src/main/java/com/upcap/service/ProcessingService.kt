@@ -5,12 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.upcap.model.ProcessingMode
 import com.upcap.model.ProcessingState
+import com.upcap.model.QualityPreset
 import com.upcap.model.SubtitleSegment
 import com.upcap.pipeline.AiQualityPipeline
 import com.upcap.pipeline.SubtitleGenerator
@@ -43,6 +45,18 @@ class ProcessingService : Service() {
     private val _processingState = MutableStateFlow<ProcessingState>(ProcessingState.Idle)
     val processingState: StateFlow<ProcessingState> = _processingState
 
+    private val _logs = MutableStateFlow<List<String>>(emptyList())
+    val logs: StateFlow<List<String>> = _logs
+
+    private val _previewFrame = MutableStateFlow<Bitmap?>(null)
+    val previewFrame: StateFlow<Bitmap?> = _previewFrame
+
+    private fun log(message: String) {
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        _logs.value = _logs.value + "[$timestamp] $message"
+    }
+
     private val notificationManager by lazy {
         getSystemService(NotificationManager::class.java)
     }
@@ -62,24 +76,35 @@ class ProcessingService : Service() {
         val videoUriStr = intent?.getStringExtra(EXTRA_VIDEO_URI) ?: return START_NOT_STICKY
         val modeName = intent.getStringExtra(EXTRA_MODE) ?: return START_NOT_STICKY
         val mode = ProcessingMode.entries.firstOrNull { it.name == modeName } ?: return START_NOT_STICKY
+        val presetName = intent.getStringExtra(EXTRA_PRESET) ?: QualityPreset.BALANCED.name
+        val preset = QualityPreset.entries.firstOrNull { it.name == presetName } ?: QualityPreset.BALANCED
         val videoUri = Uri.parse(videoUriStr)
 
         startForeground(NOTIFICATION_ID, createNotification("준비 중...", 0))
-        startProcessing(videoUri, mode)
+        startProcessing(videoUri, mode, preset)
 
         return START_NOT_STICKY
     }
 
-    private fun startProcessing(videoUri: Uri, mode: ProcessingMode) {
+    private fun startProcessing(videoUri: Uri, mode: ProcessingMode, preset: QualityPreset) {
         processingJob = scope.launch {
             try {
                 var currentVideoPath: String? = null
                 var subtitles: List<SubtitleSegment>? = null
                 val outputDir = File(cacheDir, "processing").also { it.mkdirs() }
+                _logs.value = emptyList()
+                _previewFrame.value = null
+
+                log("처리 시작: 모드=${mode.name}, 프리셋=${preset.label}")
 
                 if (mode == ProcessingMode.QUALITY || mode == ProcessingMode.BOTH) {
+                    log("AI 화질 개선 파이프라인 시작")
                     var qualityFailed = false
-                    aiQualityPipeline.enhance(videoUri, outputDir).collect { result ->
+                    aiQualityPipeline.enhance(
+                        videoUri, outputDir, preset,
+                        onLog = { msg -> log(msg) },
+                        onPreview = { bitmap -> _previewFrame.value = bitmap }
+                    ).collect { result ->
                         when (result) {
                             is AiQualityPipeline.QualityResult.Progress -> {
                                 val overallProgress = if (mode == ProcessingMode.BOTH) {
@@ -92,8 +117,10 @@ class ProcessingService : Service() {
                             }
                             is AiQualityPipeline.QualityResult.Success -> {
                                 currentVideoPath = result.outputPath
+                                log("AI 화질 개선 완료")
                             }
                             is AiQualityPipeline.QualityResult.Error -> {
+                                log("AI 화질 개선 실패: ${result.message}")
                                 _processingState.value = ProcessingState.Error(result.message)
                                 qualityFailed = true
                             }
@@ -106,8 +133,9 @@ class ProcessingService : Service() {
                 }
 
                 if (mode == ProcessingMode.SUBTITLE || mode == ProcessingMode.BOTH) {
+                    log("AI 자막 생성 파이프라인 시작")
                     var subtitleFailed = false
-                    subtitleGenerator.generate(videoUri).collect { result ->
+                    subtitleGenerator.generate(videoUri) { msg -> log(msg) }.collect { result ->
                         when (result) {
                             is SubtitleGenerator.SubtitleResult.Progress -> {
                                 val overallProgress = if (mode == ProcessingMode.BOTH) {
@@ -120,8 +148,10 @@ class ProcessingService : Service() {
                             }
                             is SubtitleGenerator.SubtitleResult.Success -> {
                                 subtitles = result.subtitles
+                                log("AI 자막 생성 완료: ${result.subtitles.size}개 자막")
                             }
                             is SubtitleGenerator.SubtitleResult.Error -> {
+                                log("AI 자막 생성 실패: ${result.message}")
                                 _processingState.value = ProcessingState.Error(result.message)
                                 subtitleFailed = true
                             }
@@ -133,17 +163,21 @@ class ProcessingService : Service() {
                     }
                 }
 
+                log("최종 내보내기 시작")
                 _processingState.value = ProcessingState.Exporting(0.95f)
                 updateNotification("내보내는 중...", 95)
 
                 val finalPath = when {
                     currentVideoPath != null && subtitles != null -> {
+                        log("자막 번인 + 화질 개선 영상 합성")
                         videoExporter.burnSubtitles(currentVideoPath!!, subtitles!!)
                     }
                     currentVideoPath != null -> {
+                        log("화질 개선 영상 복사")
                         videoExporter.copyVideo(currentVideoPath!!)
                     }
                     subtitles != null -> {
+                        log("원본 영상에 자막 번인")
                         val tempInput = copyUriToLocal(videoUri)
                         videoExporter.burnSubtitles(tempInput, subtitles!!)
                     }
@@ -154,15 +188,18 @@ class ProcessingService : Service() {
                     }
                 }
 
+                log("처리 완료: $finalPath")
                 _processingState.value = ProcessingState.Completed(finalPath, subtitles)
                 updateNotification("완료", 100)
 
                 delay(2_000)
                 stopSelf()
             } catch (e: CancellationException) {
+                log("처리 취소됨")
                 _processingState.value = ProcessingState.Cancelled
                 stopSelf()
             } catch (e: Exception) {
+                log("오류 발생: ${e.message}")
                 _processingState.value = ProcessingState.Error(e.message ?: "알 수 없는 오류")
                 stopSelf()
             }
@@ -218,6 +255,7 @@ class ProcessingService : Service() {
     companion object {
         const val EXTRA_VIDEO_URI = "extra_video_uri"
         const val EXTRA_MODE = "extra_mode"
+        const val EXTRA_PRESET = "extra_preset"
         const val CHANNEL_ID = "processing_channel"
         const val NOTIFICATION_ID = 1001
     }

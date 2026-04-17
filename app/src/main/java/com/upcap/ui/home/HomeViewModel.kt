@@ -10,6 +10,7 @@ import com.upcap.pipeline.AiModelKind
 import com.upcap.pipeline.ModelAssetManager
 import com.upcap.pipeline.ModelDownloadStatus
 import com.upcap.model.ProcessingMode
+import com.upcap.model.QualityPreset
 import com.upcap.model.VideoInfo
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -31,6 +32,9 @@ class HomeViewModel @Inject constructor(
 
     private val _selectedMode = MutableStateFlow(ProcessingMode.BOTH)
     val selectedMode: StateFlow<ProcessingMode> = _selectedMode
+
+    private val _selectedPreset = MutableStateFlow(QualityPreset.BALANCED)
+    val selectedPreset: StateFlow<QualityPreset> = _selectedPreset
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
@@ -120,6 +124,10 @@ class HomeViewModel @Inject constructor(
 
     fun selectMode(mode: ProcessingMode) {
         _selectedMode.value = mode
+    }
+
+    fun selectPreset(preset: QualityPreset) {
+        _selectedPreset.value = preset
     }
 
     fun clearError() {

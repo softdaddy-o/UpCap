@@ -21,28 +21,41 @@ import javax.inject.Inject
 class SubtitleGenerator @Inject constructor(
     private val context: Context
 ) {
-    fun generate(videoUri: Uri): Flow<SubtitleResult> = channelFlow {
+    fun generate(
+        videoUri: Uri,
+        onLog: (String) -> Unit = {}
+    ): Flow<SubtitleResult> = channelFlow {
         val wavFile = File(context.cacheDir, "whisper_${System.currentTimeMillis()}.wav")
 
         try {
             send(SubtitleResult.Progress(0.05f))
 
+            onLog("Whisper 모델 준비 중...")
             val modelFile = ModelAssetManager.getInstance(context).ensureAvailable(AiModelKind.SUBTITLE) { progress ->
                 trySend(SubtitleResult.Progress(0.05f + progress * 0.30f))
             }
+            onLog("Whisper 모델 준비 완료")
 
+            onLog("영상 길이 분석 중...")
             val durationMs = readDurationMs(videoUri)
+            onLog("영상 길이: ${durationMs / 1000}초")
+
+            onLog("오디오 트랙 디코딩 중 (16kHz mono WAV)...")
             val hasAudio = decodeAudioTrackToMono16KhzWav(videoUri, wavFile)
             if (!hasAudio) {
+                onLog("오디오 트랙 없음")
                 send(SubtitleResult.Error("영상에서 음성 트랙을 읽지 못했습니다."))
                 return@channelFlow
             }
+            onLog("오디오 디코딩 완료 (${wavFile.length() / 1024}KB)")
 
             send(SubtitleResult.Progress(0.45f))
 
+            onLog("Whisper 음성 인식 시작...")
             val transcript = WhisperBridge(modelFile.absolutePath).use { whisper ->
                 whisper.transcribe(wavFile, language = "ko")
             }.trim()
+            onLog("음성 인식 완료 (${transcript.length}자)")
 
             send(SubtitleResult.Progress(0.85f))
 

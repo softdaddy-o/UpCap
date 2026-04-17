@@ -4,12 +4,14 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.IBinder
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.upcap.model.ProcessingMode
 import com.upcap.model.ProcessingState
+import com.upcap.model.QualityPreset
 import com.upcap.service.ProcessingService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -26,6 +28,12 @@ class ProcessingViewModel @Inject constructor(
     private val _state = MutableStateFlow<ProcessingState>(ProcessingState.Idle)
     val state: StateFlow<ProcessingState> = _state
 
+    private val _logs = MutableStateFlow<List<String>>(emptyList())
+    val logs: StateFlow<List<String>> = _logs
+
+    private val _previewFrame = MutableStateFlow<Bitmap?>(null)
+    val previewFrame: StateFlow<Bitmap?> = _previewFrame
+
     private var service: ProcessingService? = null
     private var bound = false
 
@@ -38,6 +46,16 @@ class ProcessingViewModel @Inject constructor(
                     _state.value = state
                 }
             }
+            viewModelScope.launch {
+                service?.logs?.collect { logs ->
+                    _logs.value = logs
+                }
+            }
+            viewModelScope.launch {
+                service?.previewFrame?.collect { bitmap ->
+                    _previewFrame.value = bitmap
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -46,11 +64,12 @@ class ProcessingViewModel @Inject constructor(
         }
     }
 
-    fun startProcessing(videoUri: String, mode: ProcessingMode) {
+    fun startProcessing(videoUri: String, mode: ProcessingMode, preset: QualityPreset) {
         val uri = Uri.parse(java.net.URLDecoder.decode(videoUri, "UTF-8"))
         val intent = Intent(context, ProcessingService::class.java).apply {
             putExtra(ProcessingService.EXTRA_VIDEO_URI, uri.toString())
             putExtra(ProcessingService.EXTRA_MODE, mode.name)
+            putExtra(ProcessingService.EXTRA_PRESET, preset.name)
         }
         context.startForegroundService(intent)
         context.bindService(intent, connection, Context.BIND_AUTO_CREATE)

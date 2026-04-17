@@ -69,7 +69,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
+import com.upcap.BuildConfig
 import com.upcap.model.ProcessingMode
+import com.upcap.model.QualityPreset
 import com.upcap.pipeline.AiModelKind
 import com.upcap.pipeline.ModelDownloadStatus
 import com.upcap.pipeline.ModelState
@@ -77,12 +79,13 @@ import com.upcap.pipeline.ModelState
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
-    onStartProcessing: (Uri, ProcessingMode) -> Unit,
+    onStartProcessing: (Uri, ProcessingMode, QualityPreset) -> Unit,
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     val videoInfo by viewModel.videoInfo.collectAsState()
     val selectedMode by viewModel.selectedMode.collectAsState()
+    val selectedPreset by viewModel.selectedPreset.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val qualityModelStatus by viewModel.qualityModelStatus.collectAsState()
     val subtitleModelStatus by viewModel.subtitleModelStatus.collectAsState()
@@ -130,11 +133,22 @@ fun HomeScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(
-                            text = "UpCap",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(
+                            verticalAlignment = Alignment.Bottom,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "UpCap",
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "v${BuildConfig.VERSION_NAME}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                        }
                         Text(
                             text = "AI 화질 개선 & AI 자막",
                             style = MaterialTheme.typography.bodySmall,
@@ -190,7 +204,7 @@ fun HomeScreen(
                                 viewModel.setError("선택한 처리 모드에 필요한 AI 모델을 다운로드해 주세요.")
                                 return@Button
                             }
-                            videoInfo?.let { onStartProcessing(it.uri, selectedMode) }
+                            videoInfo?.let { onStartProcessing(it.uri, selectedMode, selectedPreset) }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -401,6 +415,24 @@ fun HomeScreen(
                     isSelected = selectedMode == ProcessingMode.BOTH,
                     onClick = { viewModel.selectMode(ProcessingMode.BOTH) }
                 )
+            }
+
+            if (selectedMode != ProcessingMode.SUBTITLE) {
+                Text(
+                    text = "처리 속도",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    QualityPreset.entries.forEach { preset ->
+                        PresetCard(
+                            preset = preset,
+                            isSelected = selectedPreset == preset,
+                            onClick = { viewModel.selectPreset(preset) }
+                        )
+                    }
+                }
             }
 
             if (allModelsReady) {
@@ -648,6 +680,57 @@ private fun ModeCard(
                 )
                 Text(
                     text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            RadioButton(selected = isSelected, onClick = null)
+        }
+    }
+}
+
+@Composable
+private fun PresetCard(
+    preset: QualityPreset,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    val borderColor by animateColorAsState(
+        targetValue = if (isSelected) MaterialTheme.colorScheme.tertiary
+        else MaterialTheme.colorScheme.surfaceVariant,
+        label = "preset_border"
+    )
+    val containerColor by animateColorAsState(
+        targetValue = if (isSelected) MaterialTheme.colorScheme.tertiary.copy(alpha = 0.08f)
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        label = "preset_container"
+    )
+
+    OutlinedCard(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(
+            width = if (isSelected) 2.dp else 1.dp,
+            color = borderColor
+        ),
+        colors = CardDefaults.outlinedCardColors(containerColor = containerColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = preset.label,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                )
+                Text(
+                    text = preset.description,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
