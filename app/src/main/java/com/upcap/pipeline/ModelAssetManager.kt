@@ -37,7 +37,7 @@ class ModelAssetManager private constructor(
     fun refreshQualityStatus(model: QualityModel) {
         val file = File(modelDir, model.fileName)
         val ready = if (model.isArchived) {
-            file.exists() && modelDir.listFiles()?.any { it.name.endsWith(".data") } == true
+            file.exists() && (file.parentFile ?: modelDir).listFiles()?.any { it.name.endsWith(".data") } == true
         } else {
             file.exists() && file.length() >= model.minimumBytes
         }
@@ -88,7 +88,7 @@ class ModelAssetManager private constructor(
         return qualityMutex.withLock {
             val file = File(modelDir, model.fileName)
             val ready = if (model.isArchived) {
-                file.exists() && modelDir.listFiles()?.any { it.name.endsWith(".data") } == true
+                file.exists() && (file.parentFile ?: modelDir).listFiles()?.any { it.name.endsWith(".data") } == true
             } else {
                 file.exists() && file.length() >= model.minimumBytes
             }
@@ -105,7 +105,9 @@ class ModelAssetManager private constructor(
         onProgress: (Float) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val file = File(modelDir, model.fileName)
+        file.parentFile?.mkdirs()
         val downloadTarget = if (model.isArchived) File(modelDir, "${model.fileName}.download.zip") else file
+        downloadTarget.parentFile?.mkdirs()
 
         _qualityStatus.value = ModelDownloadStatus(
             kind = AiModelKind.QUALITY,
@@ -173,7 +175,7 @@ class ModelAssetManager private constructor(
         }
 
         val verified = if (model.isArchived) {
-            file.exists() && modelDir.listFiles()?.any { it.name.endsWith(".data") } == true
+            file.exists() && (file.parentFile ?: modelDir).listFiles()?.any { it.name.endsWith(".data") } == true
         } else {
             file.exists() && file.length() >= model.minimumBytes
         }
