@@ -79,8 +79,8 @@ class ProcessingService : Service() {
         val mode = ProcessingMode.entries.firstOrNull { it.name == modeName } ?: return START_NOT_STICKY
         val presetName = intent.getStringExtra(EXTRA_PRESET) ?: QualityPreset.BALANCED.name
         val preset = QualityPreset.entries.firstOrNull { it.name == presetName } ?: QualityPreset.BALANCED
-        val modelName = intent.getStringExtra(EXTRA_MODEL) ?: QualityModel.MOBILE_V3.name
-        val qualityModel = QualityModel.entries.firstOrNull { it.name == modelName } ?: QualityModel.MOBILE_V3
+        val modelName = intent.getStringExtra(EXTRA_MODEL) ?: QualityModel.XLSR_FAST.name
+        val qualityModel = QualityModel.entries.firstOrNull { it.name == modelName } ?: QualityModel.XLSR_FAST
         val sharpen = intent.getBooleanExtra(EXTRA_SHARPEN, false)
         val denoise = intent.getBooleanExtra(EXTRA_DENOISE, false)
         val videoUri = Uri.parse(videoUriStr)
@@ -95,7 +95,7 @@ class ProcessingService : Service() {
         videoUri: Uri,
         mode: ProcessingMode,
         preset: QualityPreset,
-        qualityModel: QualityModel = QualityModel.MOBILE_V3,
+        qualityModel: QualityModel = QualityModel.XLSR_FAST,
         sharpen: Boolean = false,
         denoise: Boolean = false
     ) {

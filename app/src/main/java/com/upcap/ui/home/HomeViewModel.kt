@@ -37,7 +37,7 @@ class HomeViewModel @Inject constructor(
     private val _selectedPreset = MutableStateFlow(QualityPreset.BALANCED)
     val selectedPreset: StateFlow<QualityPreset> = _selectedPreset
 
-    private val _selectedModel = MutableStateFlow(QualityModel.MOBILE_V3)
+    private val _selectedModel = MutableStateFlow(QualityModel.XLSR_FAST)
     val selectedModel: StateFlow<QualityModel> = _selectedModel
 
     private val _sharpenEnabled = MutableStateFlow(false)

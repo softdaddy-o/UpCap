@@ -43,7 +43,7 @@ class AiQualityPipeline @Inject constructor(
         videoUri: Uri,
         outputDir: File,
         preset: QualityPreset = QualityPreset.BALANCED,
-        qualityModel: QualityModel = QualityModel.MOBILE_V3,
+        qualityModel: QualityModel = QualityModel.XLSR_FAST,
         sharpen: Boolean = false,
         denoise: Boolean = false,
         onLog: (String) -> Unit = {},

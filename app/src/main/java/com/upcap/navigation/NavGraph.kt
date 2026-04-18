@@ -67,7 +67,7 @@ fun UpCapNavGraph(navController: NavHostController) {
             val encodedUri = backStackEntry.arguments?.getString("videoUri") ?: return@composable
             val modeName = backStackEntry.arguments?.getString("mode") ?: return@composable
             val presetName = backStackEntry.arguments?.getString("preset") ?: QualityPreset.BALANCED.name
-            val modelName = backStackEntry.arguments?.getString("model") ?: QualityModel.MOBILE_V3.name
+            val modelName = backStackEntry.arguments?.getString("model") ?: QualityModel.XLSR_FAST.name
             val sharpen = backStackEntry.arguments?.getString("sharpen")?.toBooleanStrictOrNull() ?: false
             val denoise = backStackEntry.arguments?.getString("denoise")?.toBooleanStrictOrNull() ?: false
             val mode = ProcessingMode.valueOf(modeName)

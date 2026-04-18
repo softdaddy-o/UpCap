@@ -72,7 +72,7 @@ fun ProcessingScreen(
     videoUri: String,
     mode: ProcessingMode,
     preset: QualityPreset,
-    qualityModel: QualityModel = QualityModel.MOBILE_V3,
+    qualityModel: QualityModel = QualityModel.XLSR_FAST,
     sharpen: Boolean = false,
     denoise: Boolean = false,
     onCompleted: (outputPath: String, subtitles: List<SubtitleSegment>?) -> Unit,
