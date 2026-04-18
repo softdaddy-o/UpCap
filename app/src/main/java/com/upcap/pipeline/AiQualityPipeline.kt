@@ -78,7 +78,7 @@ class AiQualityPipeline @Inject constructor(
 
             send(QualityResult.Progress(0.20f))
 
-            processVideo(inputPath, outputPath, modelFile, preset, effectiveSharpen, effectiveDenoise, onLog, onPreview) { progress ->
+            processVideo(inputPath, outputPath, modelFile, preset, qualityModel.scale, effectiveSharpen, effectiveDenoise, onLog, onPreview) { progress ->
                 trySend(QualityResult.Progress(0.20f + progress * 0.75f))
             }
 
@@ -99,6 +99,7 @@ class AiQualityPipeline @Inject constructor(
         outputPath: String,
         modelFile: File?,
         preset: QualityPreset,
+        scale: Int,
         sharpen: Boolean,
         denoise: Boolean,
         onLog: (String) -> Unit,
@@ -302,6 +303,7 @@ class AiQualityPipeline @Inject constructor(
                                                 frameBitmap, env!!, session!!,
                                                 tileSize, tileOverlap, tileStride,
                                                 inputDownscale = preset.inputDownscale,
+                                                scale = scale,
                                                 onLog = if (framesProcessed == 0L) onLog else { _ -> }
                                             ) { tilesDone, totalTiles ->
                                                 val subProgress = (framesProcessed.toFloat() + tilesDone.toFloat() / totalTiles) / totalFrames
@@ -498,6 +500,7 @@ class AiQualityPipeline @Inject constructor(
         tileOverlap: Int,
         tileStride: Int,
         inputDownscale: Int,
+        scale: Int,
         onLog: (String) -> Unit = { _ -> },
         onTileProgress: (tilesDone: Int, totalTiles: Int) -> Unit = { _, _ -> }
     ): Bitmap {
@@ -527,8 +530,8 @@ class AiQualityPipeline @Inject constructor(
 
         // Render SR tiles into a canvas sized at the SR output of the downscaled
         // input (downW*4 × downH*4). A final resize maps that to origW × origH.
-        val srW = downW * SCALE
-        val srH = downH * SCALE
+        val srW = downW * scale
+        val srH = downH * scale
         val srCanvasBmp = Bitmap.createBitmap(srW, srH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(srCanvasBmp)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -554,7 +557,7 @@ class AiQualityPipeline @Inject constructor(
 
                 if (tilesDone == 0) onLog("첫 타일 session.run 시작 (ONNX 컴파일/NNAPI 파티셔닝 발생 가능)")
                 val tileStartMs = System.currentTimeMillis()
-                val srPixels = processTile(tilePixels, env, session, tileSize)
+                val srPixels = processTile(tilePixels, env, session, tileSize, scale)
                 val tileElapsed = System.currentTimeMillis() - tileStartMs
                 totalInferenceMs += tileElapsed
                 if (tilesDone == 0) {
@@ -573,7 +576,7 @@ class AiQualityPipeline @Inject constructor(
                     val avg = totalInferenceMs / 5
                     onLog("초기 5타일 평균 추론: ${avg}ms/tile")
                 }
-                val srSize = tileSize * SCALE
+                val srSize = tileSize * scale
 
                 val padLeft = outLeft - srcLeft
                 val padTop = outTop - srcTop
@@ -581,16 +584,16 @@ class AiQualityPipeline @Inject constructor(
                 val usableH = outBottom - outTop
 
                 // Source rect inside the 512×512 SR tile (in SR pixels)
-                val cropLeft = padLeft * SCALE
-                val cropTop = padTop * SCALE
-                val cropRight = cropLeft + usableW * SCALE
-                val cropBottom = cropTop + usableH * SCALE
+                val cropLeft = padLeft * scale
+                val cropTop = padTop * scale
+                val cropRight = cropLeft + usableW * scale
+                val cropBottom = cropTop + usableH * scale
 
                 // Destination rect in the SR canvas (also in SR pixels)
-                val destLeft = outLeft * SCALE
-                val destTop = outTop * SCALE
-                val destRight = outRight * SCALE
-                val destBottom = outBottom * SCALE
+                val destLeft = outLeft * scale
+                val destTop = outTop * scale
+                val destRight = outRight * scale
+                val destBottom = outBottom * scale
 
                 val srBitmap = Bitmap.createBitmap(srPixels, srSize, srSize, Bitmap.Config.ARGB_8888)
                 canvas.drawBitmap(
@@ -654,7 +657,8 @@ class AiQualityPipeline @Inject constructor(
         tilePixels: IntArray,
         env: OrtEnvironment,
         session: OrtSession,
-        tileSize: Int
+        tileSize: Int,
+        scale: Int
     ): IntArray {
         val tileArea = tileSize * tileSize
         val inputFloats = MODEL_CHANNELS * tileArea
@@ -693,7 +697,7 @@ class AiQualityPipeline @Inject constructor(
                     ?: FloatArray(totalFloats).also { reusableEnhancedArray = it }
                 outputBuf.get(enhanced)
 
-                val outSize = tileSize * SCALE
+                val outSize = tileSize * scale
                 val planeSize = outSize * outSize
                 val pixels = reusableOutPixels?.takeIf { it.size == planeSize }
                     ?: IntArray(planeSize).also { reusableOutPixels = it }
@@ -958,7 +962,6 @@ class AiQualityPipeline @Inject constructor(
     )
 
     companion object {
-        private const val SCALE = 4
         private const val MODEL_CHANNELS = 3
         private const val CODEC_TIMEOUT_US = 10_000L
     }

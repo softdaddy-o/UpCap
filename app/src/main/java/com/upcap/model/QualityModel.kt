@@ -7,7 +7,11 @@ enum class QualityModel(
     val url: String,
     val minimumBytes: Long,
     val sizeLabel: String,
-    val isArchived: Boolean = false
+    val isArchived: Boolean = false,
+    /** Upscale factor the model applies to its input tile. Most models are 4×
+     *  (128→512). Swin2SR lightweight is 2×. The pipeline uses this to size
+     *  the per-tile output canvas. */
+    val scale: Int = 4
 ) {
     // Qualcomm AI Hub XLSR — extremely light, mobile-NPU first. Same I/O shape
     // as the other SR models (128×128 → 512×512, 4×). Ideal default when the
@@ -53,6 +57,21 @@ enum class QualityModel(
         minimumBytes = 3_000_000L,
         sizeLabel = "약 5 MB",
         isArchived = true
+    ),
+    // Experimental: HuggingFace Xenova/swin2SR-lightweight-x2-64 uint8.
+    // Transformer-based SR, 2× upscale, ~6019 ops (vs ~30 for XLSR). Expect this
+    // to be SLOW on NPU — window attention is poorly supported by NNAPI — and
+    // the heuristic verdict will likely show "CPU 실행 중". Kept as an A/B option
+    // so the user can see the quality/speed tradeoff themselves.
+    SWIN2SR_LITE(
+        label = "실험 고품질 (Swin2SR 2x)",
+        description = "HF Swin2SR lightweight uint8 — 품질 ↑, 속도 ↓ (실험)",
+        fileName = "swin2sr_lite_u8.onnx",
+        url = "https://huggingface.co/Xenova/swin2SR-lightweight-x2-64/resolve/main/onnx/model_uint8.onnx",
+        minimumBytes = 4_000_000L,
+        sizeLabel = "약 5.5 MB",
+        isArchived = false,
+        scale = 2
     ),
     DESKTOP_PLUS(
         label = "고품질 (데스크탑)",
