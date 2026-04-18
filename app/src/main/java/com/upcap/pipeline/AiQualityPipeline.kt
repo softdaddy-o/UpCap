@@ -107,27 +107,19 @@ class AiQualityPipeline @Inject constructor(
     ) {
         val env: OrtEnvironment? = if (preset.usesAi) OrtEnvironment.getEnvironment() else null
         val session: OrtSession? = if (preset.usesAi && modelFile != null) {
-            onLog("ONNX 런타임 초기화 (NNAPI 전용, CPU 폴백 차단)")
+            onLog("ONNX 런타임 초기화")
             val sessionOptions = OrtSession.SessionOptions().apply {
-                // We intentionally do NOT set intra/inter-op thread counts: those are
-                // for the default CPU EP, which we refuse to use. If NNAPI partitions
-                // any subgraph to CPU it would go through the default EP — disabled
-                // below — so any unsupported op will cause session creation to fail
-                // loudly rather than silently running slow on CPU.
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                val nnapiFlags = EnumSet.of(NNAPIFlags.CPU_DISABLED)
+                // Try NNAPI for NPU/GPU offload. If NNAPI isn't available (emulator,
+                // driverless device, unsupported op set), fall back to ORT's default
+                // CPU EP instead of crashing. Which path actually runs is confirmed
+                // by the first-tile timing verdict below.
                 try {
-                    addNnapi(nnapiFlags)
+                    addNnapi(EnumSet.noneOf(NNAPIFlags::class.java))
+                    onLog("실행 공급자(EP) 등록: NNAPI — 지원 연산은 NPU/GPU, 미지원은 CPU")
                 } catch (t: Throwable) {
-                    onLog("NNAPI 바인딩 실패: ${t.message}")
-                    throw IllegalStateException(
-                        "NNAPI 가속을 초기화할 수 없어 처리를 중단합니다. " +
-                            "이 기기는 NPU/GPU NNAPI 드라이버가 없거나 버전이 낮을 수 있습니다. " +
-                            "[후보정만] 프리셋으로 재시도하세요.",
-                        t
-                    )
+                    onLog("실행 공급자(EP) 등록: CPU 전용 — NNAPI 등록 실패 (${t.message ?: "알 수 없음"})")
                 }
-                onLog("실행 공급자(EP): NNAPI (CPU_DISABLED)")
             }
             onLog("AI 모델 세션 로딩 중...")
             env!!.createSession(modelFile.absolutePath, sessionOptions)
@@ -565,7 +557,18 @@ class AiQualityPipeline @Inject constructor(
                 val srPixels = processTile(tilePixels, env, session, tileSize)
                 val tileElapsed = System.currentTimeMillis() - tileStartMs
                 totalInferenceMs += tileElapsed
-                if (tilesDone == 0) onLog("첫 타일 session.run 완료 (${tileElapsed}ms)")
+                if (tilesDone == 0) {
+                    // Heuristic classifier for the single question users actually care
+                    // about: is the NPU doing the work, or did CPU capture the graph?
+                    // Thresholds are calibrated for 128→512 XLSR-class models where
+                    // NPU runs <15ms and CPU takes 60–400ms for the same tile.
+                    val verdict = when {
+                        tileElapsed < 20 -> "🚀 NPU/GPU 가속 실행 중"
+                        tileElapsed < 60 -> "⚡ NPU 부분 가속 (일부 연산 CPU 폴백)"
+                        else -> "🐢 CPU 실행 중 — NNAPI가 이 모델을 NPU에 올리지 못했습니다"
+                    }
+                    onLog("첫 타일 session.run 완료 (${tileElapsed}ms) — $verdict")
+                }
                 if (tilesDone == 4) {
                     val avg = totalInferenceMs / 5
                     onLog("초기 5타일 평균 추론: ${avg}ms/tile")
