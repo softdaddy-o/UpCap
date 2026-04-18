@@ -3,6 +3,8 @@ package com.upcap.pipeline
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
+import java.util.EnumSet
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -30,6 +32,13 @@ import kotlin.coroutines.coroutineContext
 class AiQualityPipeline @Inject constructor(
     private val context: Context
 ) {
+    // Reusable per-tile buffers. Allocated lazily, sized by the first tile,
+    // then reused for the remainder of the run. processTile is called from a
+    // single coroutine so there is no concurrent access.
+    private var reusableInputBuffer: FloatBuffer? = null
+    private var reusableEnhancedArray: FloatArray? = null
+    private var reusableOutPixels: IntArray? = null
+    private var reusableTileBuffer: IntArray? = null
     fun enhance(
         videoUri: Uri,
         outputDir: File,
@@ -46,19 +55,30 @@ class AiQualityPipeline @Inject constructor(
         try {
             send(QualityResult.Progress(0.05f))
             onLog("영상 파일 복사 완료")
-            onLog("품질 프리셋: ${preset.label} (타일 ${QualityPreset.MODEL_TILE_SIZE}px, 겹침 ${preset.tileOverlap}px)")
-            onLog("모델: ${qualityModel.label}, 샤프닝: ${if (sharpen) "켜짐" else "꺼짐"}, 노이즈 제거: ${if (denoise) "켜짐" else "꺼짐"}")
+            onLog("품질 프리셋: ${preset.label} (AI=${preset.usesAi}, 타일 ${QualityPreset.MODEL_TILE_SIZE}px, 겹침 ${preset.tileOverlap}px, 입력 축소 ${preset.inputDownscale}x, 프레임 간격 ${preset.frameStride})")
+            // POSTPROCESS forces denoise+sharpen on regardless of user toggles:
+            // otherwise the mode would do nothing at all. For AI presets we honor
+            // the user's choice.
+            val effectiveDenoise = if (preset.usesAi) denoise else true
+            val effectiveSharpen = if (preset.usesAi) sharpen else true
+            onLog("모델: ${qualityModel.label}, 샤프닝: ${if (effectiveSharpen) "켜짐" else "꺼짐"}, 노이즈 제거: ${if (effectiveDenoise) "켜짐" else "꺼짐"}")
 
-            onLog("AI 화질 모델 준비 중...")
-            val modelFile = ModelAssetManager.getInstance(context)
-                .ensureQualityModelAvailable(qualityModel) { progress ->
-                    trySend(QualityResult.Progress(0.05f + progress * 0.15f))
-                }
-            onLog("AI 화질 모델 준비 완료")
+            val modelFile: File? = if (preset.usesAi) {
+                onLog("AI 화질 모델 준비 중...")
+                val mf = ModelAssetManager.getInstance(context)
+                    .ensureQualityModelAvailable(qualityModel) { progress ->
+                        trySend(QualityResult.Progress(0.05f + progress * 0.15f))
+                    }
+                onLog("AI 화질 모델 준비 완료")
+                mf
+            } else {
+                onLog("후보정만 모드 — AI 모델 다운로드 건너뜀")
+                null
+            }
 
             send(QualityResult.Progress(0.20f))
 
-            processVideo(inputPath, outputPath, modelFile, preset, sharpen, denoise, onLog, onPreview) { progress ->
+            processVideo(inputPath, outputPath, modelFile, preset, effectiveSharpen, effectiveDenoise, onLog, onPreview) { progress ->
                 trySend(QualityResult.Progress(0.20f + progress * 0.75f))
             }
 
@@ -77,7 +97,7 @@ class AiQualityPipeline @Inject constructor(
     private suspend fun processVideo(
         inputPath: String,
         outputPath: String,
-        modelFile: File,
+        modelFile: File?,
         preset: QualityPreset,
         sharpen: Boolean,
         denoise: Boolean,
@@ -85,28 +105,43 @@ class AiQualityPipeline @Inject constructor(
         onPreview: (Bitmap) -> Unit,
         onProgress: (Float) -> Unit
     ) {
-        val env = OrtEnvironment.getEnvironment()
-        val cpuThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-        onLog("ONNX 런타임 초기화 (스레드: $cpuThreads)")
-        val sessionOptions = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(cpuThreads)
-            setInterOpNumThreads(1)
-            setCPUArenaAllocator(true)
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            try {
-                addNnapi()
-                onLog("NNAPI (GPU/NPU) 가속 활성화")
-            } catch (_: Exception) {
-                onLog("NNAPI 미지원 — CPU 모드로 실행")
+        val env: OrtEnvironment? = if (preset.usesAi) OrtEnvironment.getEnvironment() else null
+        val session: OrtSession? = if (preset.usesAi && modelFile != null) {
+            onLog("ONNX 런타임 초기화 (NNAPI 전용, CPU 폴백 차단)")
+            val sessionOptions = OrtSession.SessionOptions().apply {
+                // We intentionally do NOT set intra/inter-op thread counts: those are
+                // for the default CPU EP, which we refuse to use. If NNAPI partitions
+                // any subgraph to CPU it would go through the default EP — disabled
+                // below — so any unsupported op will cause session creation to fail
+                // loudly rather than silently running slow on CPU.
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                val nnapiFlags = EnumSet.of(NNAPIFlags.CPU_DISABLED)
+                try {
+                    addNnapi(nnapiFlags)
+                } catch (t: Throwable) {
+                    onLog("NNAPI 바인딩 실패: ${t.message}")
+                    throw IllegalStateException(
+                        "NNAPI 가속을 초기화할 수 없어 처리를 중단합니다. " +
+                            "이 기기는 NPU/GPU NNAPI 드라이버가 없거나 버전이 낮을 수 있습니다. " +
+                            "[후보정만] 프리셋으로 재시도하세요.",
+                        t
+                    )
+                }
+                onLog("실행 공급자(EP): NNAPI (CPU_DISABLED)")
             }
+            onLog("AI 모델 세션 로딩 중...")
+            env!!.createSession(modelFile.absolutePath, sessionOptions)
+        } else {
+            null
         }
 
-        onLog("AI 모델 세션 로딩 중...")
-        env.createSession(modelFile.absolutePath, sessionOptions).use { session ->
-            val inputInfo = session.inputInfo.entries.joinToString { "${it.key}: ${(it.value.info as? ai.onnxruntime.TensorInfo)?.shape?.contentToString() ?: "?"}" }
-            val outputInfo = session.outputInfo.entries.joinToString { "${it.key}: ${(it.value.info as? ai.onnxruntime.TensorInfo)?.shape?.contentToString() ?: "?"}" }
-            onLog("모델 입력: [$inputInfo] / 출력: [$outputInfo]")
-            onLog("AI 모델 세션 로딩 완료 (최적화: ALL_OPT)")
+        try {
+            if (session != null) {
+                val inputInfo = session.inputInfo.entries.joinToString { "${it.key}: ${(it.value.info as? ai.onnxruntime.TensorInfo)?.shape?.contentToString() ?: "?"}" }
+                val outputInfo = session.outputInfo.entries.joinToString { "${it.key}: ${(it.value.info as? ai.onnxruntime.TensorInfo)?.shape?.contentToString() ?: "?"}" }
+                onLog("모델 입력: [$inputInfo] / 출력: [$outputInfo]")
+                onLog("AI 모델 세션 로딩 완료 (최적화: ALL_OPT)")
+            }
             val videoExtractor = MediaExtractor()
             val audioExtractor = MediaExtractor()
 
@@ -132,8 +167,11 @@ class AiQualityPipeline @Inject constructor(
                 val tileSize = QualityPreset.MODEL_TILE_SIZE
                 val tileOverlap = preset.tileOverlap
                 val tileStride = preset.tileStride
-                val tilesPerFrame = ceilDiv(width, tileStride) * ceilDiv(height, tileStride)
+                val downW = (width / preset.inputDownscale).coerceAtLeast(tileSize)
+                val downH = (height / preset.inputDownscale).coerceAtLeast(tileSize)
+                val tilesPerFrame = ceilDiv(downW, tileStride) * ceilDiv(downH, tileStride)
                 onLog("영상 정보: ${width}x${height}, ${frameRate}fps, ~${totalFrames}프레임")
+                onLog("SR 입력 해상도: ${downW}x${downH} (축소 ${preset.inputDownscale}x)")
                 onLog("프레임당 타일: ${tilesPerFrame}개 (${tileSize}x${tileSize})")
 
                 videoExtractor.selectTrack(videoTrackIndex)
@@ -187,6 +225,11 @@ class AiQualityPipeline @Inject constructor(
                 var decodeDone = false
                 var encodeDone = false
                 var framesProcessed = 0L
+                // Frame-stride cache: stores the last AI-enhanced frame so that
+                // skipped frames can reuse it instead of re-running SR. Null for
+                // non-AI presets (no cache needed — every frame runs the cheap
+                // denoise/sharpen path directly).
+                var cachedEnhanced: Bitmap? = null
 
                 try {
                     while (!encodeDone) {
@@ -250,23 +293,43 @@ class AiQualityPipeline @Inject constructor(
                                         decoder.releaseOutputBuffer(outputIndex, false)
 
                                         if (framesProcessed == 0L) {
-                                            onLog("첫 번째 프레임 AI 처리 시작 (${frameBitmap.width}x${frameBitmap.height}, tile=$tileSize)...")
+                                            onLog("첫 번째 프레임 처리 시작 (${frameBitmap.width}x${frameBitmap.height}, AI=${session != null})...")
                                         }
 
-                                        // Tile-based super-resolution with sub-frame progress
+                                        // Decide whether this frame runs the expensive AI path.
+                                        //  - No AI session: always skip SR.
+                                        //  - frameStride > 1: only every Nth frame runs SR; others
+                                        //    reuse the previously enhanced bitmap. We still emit a
+                                        //    frame for each decoded input so fps is preserved.
+                                        val runSrThisFrame = session != null &&
+                                            (framesProcessed % preset.frameStride == 0L || cachedEnhanced == null)
+
                                         val frameStartMs = System.currentTimeMillis()
-                                        val enhanced = enhanceFrame(
-                                            frameBitmap, env, session,
-                                            tileSize, tileOverlap, tileStride,
-                                            onLog = if (framesProcessed == 0L) onLog else { _ -> }
-                                        ) { tilesDone, totalTiles ->
-                                            val subProgress = (framesProcessed.toFloat() + tilesDone.toFloat() / totalTiles) / totalFrames
-                                            onProgress(subProgress.coerceAtMost(1f))
-                                            val firstFrameEarly = framesProcessed == 0L && (tilesDone == 1 || tilesDone == 5)
-                                            if (firstFrameEarly || tilesDone % 20 == 0 || tilesDone == totalTiles) {
-                                                val elapsed = System.currentTimeMillis() - frameStartMs
-                                                onLog("프레임 ${framesProcessed + 1}/$totalFrames · 타일 $tilesDone/$totalTiles (${elapsed}ms)")
+                                        val enhanced: Bitmap = if (runSrThisFrame) {
+                                            val sr = enhanceFrame(
+                                                frameBitmap, env!!, session!!,
+                                                tileSize, tileOverlap, tileStride,
+                                                inputDownscale = preset.inputDownscale,
+                                                onLog = if (framesProcessed == 0L) onLog else { _ -> }
+                                            ) { tilesDone, totalTiles ->
+                                                val subProgress = (framesProcessed.toFloat() + tilesDone.toFloat() / totalTiles) / totalFrames
+                                                onProgress(subProgress.coerceAtMost(1f))
+                                                val firstFrameEarly = framesProcessed == 0L && (tilesDone == 1 || tilesDone == 5)
+                                                if (firstFrameEarly || tilesDone % 20 == 0 || tilesDone == totalTiles) {
+                                                    val elapsed = System.currentTimeMillis() - frameStartMs
+                                                    onLog("프레임 ${framesProcessed + 1}/$totalFrames · 타일 $tilesDone/$totalTiles (${elapsed}ms)")
+                                                }
                                             }
+                                            cachedEnhanced?.recycle()
+                                            cachedEnhanced = sr.copy(sr.config, false)
+                                            sr
+                                        } else if (session != null && cachedEnhanced != null) {
+                                            // Reuse last AI-enhanced frame for motion-tolerant speedup.
+                                            val cached = cachedEnhanced
+                                            cached.copy(cached.config, false)
+                                        } else {
+                                            // POSTPROCESS path: no SR at all, use the decoded frame.
+                                            frameBitmap.copy(frameBitmap.config, false)
                                         }
                                         frameBitmap.recycle()
 
@@ -316,6 +379,7 @@ class AiQualityPipeline @Inject constructor(
                         copyAudioSamples(audioExtractor, muxer, audioTrackId)
                     }
                 } finally {
+                    cachedEnhanced?.recycle()
                     runCatching { muxer.stop() }
                     runCatching { muxer.release() }
                     runCatching { encoder.stop() }
@@ -327,6 +391,8 @@ class AiQualityPipeline @Inject constructor(
                 runCatching { videoExtractor.release() }
                 runCatching { audioExtractor.release() }
             }
+        } finally {
+            session?.close()
         }
     }
 
@@ -439,52 +505,70 @@ class AiQualityPipeline @Inject constructor(
         tileSize: Int,
         tileOverlap: Int,
         tileStride: Int,
+        inputDownscale: Int,
         onLog: (String) -> Unit = { _ -> },
         onTileProgress: (tilesDone: Int, totalTiles: Int) -> Unit = { _, _ -> }
     ): Bitmap {
-        val w = frame.width
-        val h = frame.height
+        val origW = frame.width
+        val origH = frame.height
 
-        // Convert to sRGB to ensure model gets consistent input
         val srgbFrame = if (frame.config == Bitmap.Config.ARGB_8888) {
             frame
         } else {
             frame.copy(Bitmap.Config.ARGB_8888, false)
         }
 
-        val srcPixels = IntArray(w * h)
-        srgbFrame.getPixels(srcPixels, 0, w, 0, 0, w, h)
+        // Downscale input before SR. Output is always rendered back at origW×origH,
+        // so shrinking here just trades bandwidth (detail at origin) for speed. The
+        // 4× SR model then lifts us toward original — at downscale=4 this is a near
+        // no-op in resolution, but with far fewer tiles.
+        val downW = (origW / inputDownscale).coerceAtLeast(tileSize)
+        val downH = (origH / inputDownscale).coerceAtLeast(tileSize)
+        val downFrame = if (inputDownscale > 1 || srgbFrame.width != downW || srgbFrame.height != downH) {
+            Bitmap.createScaledBitmap(srgbFrame, downW, downH, true)
+        } else srgbFrame
+
+        val srcPixels = IntArray(downW * downH)
+        downFrame.getPixels(srcPixels, 0, downW, 0, 0, downW, downH)
+        if (downFrame !== srgbFrame) downFrame.recycle()
         if (srgbFrame !== frame) srgbFrame.recycle()
 
-        // Output bitmap at original resolution (SR quality at same res)
-        val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
+        // Render SR tiles into a canvas sized at the SR output of the downscaled
+        // input (downW*4 × downH*4). A final resize maps that to origW × origH.
+        val srW = downW * SCALE
+        val srH = downH * SCALE
+        val srCanvasBmp = Bitmap.createBitmap(srW, srH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(srCanvasBmp)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
-        val tilesX = ceilDiv(w, tileStride)
-        val tilesY = ceilDiv(h, tileStride)
+        val tilesX = ceilDiv(downW, tileStride)
+        val tilesY = ceilDiv(downH, tileStride)
         val totalTiles = tilesX * tilesY
         var tilesDone = 0
-        onLog("enhanceFrame 진입: ${w}x${h}, 타일 ${totalTiles}개 (stride=$tileStride, overlap=$tileOverlap)")
+        var totalInferenceMs = 0L
+        onLog("enhanceFrame 진입: 원본 ${origW}x${origH} → 축소 ${downW}x${downH} (${inputDownscale}x), 타일 ${totalTiles}개 (stride=$tileStride, overlap=$tileOverlap)")
 
         for (ty in 0 until tilesY) {
             for (tx in 0 until tilesX) {
                 val outLeft = tx * tileStride
                 val outTop = ty * tileStride
-                val outRight = minOf(outLeft + tileStride, w)
-                val outBottom = minOf(outTop + tileStride, h)
+                val outRight = minOf(outLeft + tileStride, downW)
+                val outBottom = minOf(outTop + tileStride, downH)
 
                 val srcLeft = (outLeft - tileOverlap).coerceAtLeast(0)
                 val srcTop = (outTop - tileOverlap).coerceAtLeast(0)
 
-                val tilePixels = extractTile(srcPixels, w, h, srcLeft, srcTop, tileSize)
+                val tilePixels = extractTile(srcPixels, downW, downH, srcLeft, srcTop, tileSize)
 
                 if (tilesDone == 0) onLog("첫 타일 session.run 시작 (ONNX 컴파일/NNAPI 파티셔닝 발생 가능)")
                 val tileStartMs = System.currentTimeMillis()
                 val srPixels = processTile(tilePixels, env, session, tileSize)
-                if (tilesDone == 0) {
-                    val elapsed = System.currentTimeMillis() - tileStartMs
-                    onLog("첫 타일 session.run 완료 (${elapsed}ms)")
+                val tileElapsed = System.currentTimeMillis() - tileStartMs
+                totalInferenceMs += tileElapsed
+                if (tilesDone == 0) onLog("첫 타일 session.run 완료 (${tileElapsed}ms)")
+                if (tilesDone == 4) {
+                    val avg = totalInferenceMs / 5
+                    onLog("초기 5타일 평균 추론: ${avg}ms/tile")
                 }
                 val srSize = tileSize * SCALE
 
@@ -493,16 +577,23 @@ class AiQualityPipeline @Inject constructor(
                 val usableW = outRight - outLeft
                 val usableH = outBottom - outTop
 
+                // Source rect inside the 512×512 SR tile (in SR pixels)
                 val cropLeft = padLeft * SCALE
                 val cropTop = padTop * SCALE
                 val cropRight = cropLeft + usableW * SCALE
                 val cropBottom = cropTop + usableH * SCALE
 
+                // Destination rect in the SR canvas (also in SR pixels)
+                val destLeft = outLeft * SCALE
+                val destTop = outTop * SCALE
+                val destRight = outRight * SCALE
+                val destBottom = outBottom * SCALE
+
                 val srBitmap = Bitmap.createBitmap(srPixels, srSize, srSize, Bitmap.Config.ARGB_8888)
                 canvas.drawBitmap(
                     srBitmap,
                     Rect(cropLeft, cropTop, cropRight, cropBottom),
-                    Rect(outLeft, outTop, outRight, outBottom),
+                    Rect(destLeft, destTop, destRight, destBottom),
                     paint
                 )
                 srBitmap.recycle()
@@ -512,7 +603,13 @@ class AiQualityPipeline @Inject constructor(
             }
         }
 
-        return output
+        return if (srW == origW && srH == origH) {
+            srCanvasBmp
+        } else {
+            val scaled = Bitmap.createScaledBitmap(srCanvasBmp, origW, origH, true)
+            srCanvasBmp.recycle()
+            scaled
+        }
     }
 
     private fun extractTile(
@@ -523,12 +620,28 @@ class AiQualityPipeline @Inject constructor(
         startY: Int,
         tileSize: Int
     ): IntArray {
-        val tile = IntArray(tileSize * tileSize)
-        for (y in 0 until tileSize) {
-            val sy = (startY + y).coerceIn(0, srcH - 1)
-            for (x in 0 until tileSize) {
-                val sx = (startX + x).coerceIn(0, srcW - 1)
-                tile[y * tileSize + x] = srcPixels[sy * srcW + sx]
+        val tileArea = tileSize * tileSize
+        val tile = reusableTileBuffer?.takeIf { it.size == tileArea }
+            ?: IntArray(tileArea).also { reusableTileBuffer = it }
+
+        // Fast path: tile fully inside source → one arraycopy per row, no clamp.
+        val fullyInside = startX >= 0 && startY >= 0 &&
+            startX + tileSize <= srcW && startY + tileSize <= srcH
+        if (fullyInside) {
+            for (y in 0 until tileSize) {
+                System.arraycopy(
+                    srcPixels, (startY + y) * srcW + startX,
+                    tile, y * tileSize, tileSize
+                )
+            }
+        } else {
+            for (y in 0 until tileSize) {
+                val sy = (startY + y).coerceIn(0, srcH - 1)
+                val srcStart = sy * srcW
+                for (x in 0 until tileSize) {
+                    val sx = (startX + x).coerceIn(0, srcW - 1)
+                    tile[y * tileSize + x] = srcPixels[srcStart + sx]
+                }
             }
         }
         return tile
@@ -540,8 +653,26 @@ class AiQualityPipeline @Inject constructor(
         session: OrtSession,
         tileSize: Int
     ): IntArray {
-        val inputBuffer = FloatBuffer.allocate(MODEL_CHANNELS * tileSize * tileSize)
-        putRgbNchw(inputBuffer, tilePixels)
+        val tileArea = tileSize * tileSize
+        val inputFloats = MODEL_CHANNELS * tileArea
+
+        val inputBuffer = reusableInputBuffer?.takeIf { it.capacity() == inputFloats }
+            ?: FloatBuffer.allocate(inputFloats).also { reusableInputBuffer = it }
+        inputBuffer.clear()
+
+        // Channel-first fill, one pass per channel. No per-pixel switch, no
+        // inner-loop allocation. The 1/255 constant lets the JIT fold the
+        // per-pixel divide into a multiply.
+        val inv255 = 1f / 255f
+        for (i in 0 until tileArea) {
+            inputBuffer.put(((tilePixels[i] shr 16) and 0xFF) * inv255)
+        }
+        for (i in 0 until tileArea) {
+            inputBuffer.put(((tilePixels[i] shr 8) and 0xFF) * inv255)
+        }
+        for (i in 0 until tileArea) {
+            inputBuffer.put((tilePixels[i] and 0xFF) * inv255)
+        }
         inputBuffer.rewind()
 
         val inputName = session.inputNames.first()
@@ -554,35 +685,30 @@ class AiQualityPipeline @Inject constructor(
                     ?: throw IllegalStateException("AI 모델 출력이 비어 있습니다.")
 
                 val outputBuf = output.floatBuffer
-                val enhanced = FloatArray(outputBuf.remaining())
+                val totalFloats = outputBuf.remaining()
+                val enhanced = reusableEnhancedArray?.takeIf { it.size == totalFloats }
+                    ?: FloatArray(totalFloats).also { reusableEnhancedArray = it }
                 outputBuf.get(enhanced)
 
                 val outSize = tileSize * SCALE
                 val planeSize = outSize * outSize
-                val pixels = IntArray(planeSize)
+                val pixels = reusableOutPixels?.takeIf { it.size == planeSize }
+                    ?: IntArray(planeSize).also { reusableOutPixels = it }
 
+                val gOffset = planeSize
+                val bOffset = 2 * planeSize
+                val alpha = 0xFF shl 24
                 for (i in 0 until planeSize) {
-                    val r = (enhanced[i] * 255f).toInt().coerceIn(0, 255)
-                    val g = (enhanced[planeSize + i] * 255f).toInt().coerceIn(0, 255)
-                    val b = (enhanced[2 * planeSize + i] * 255f).toInt().coerceIn(0, 255)
-                    pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    val rf = enhanced[i] * 255f
+                    val gf = enhanced[gOffset + i] * 255f
+                    val bf = enhanced[bOffset + i] * 255f
+                    val r = if (rf < 0f) 0 else if (rf > 255f) 255 else rf.toInt()
+                    val g = if (gf < 0f) 0 else if (gf > 255f) 255 else gf.toInt()
+                    val b = if (bf < 0f) 0 else if (bf > 255f) 255 else bf.toInt()
+                    pixels[i] = alpha or (r shl 16) or (g shl 8) or b
                 }
 
                 return pixels
-            }
-        }
-    }
-
-    private fun putRgbNchw(buffer: FloatBuffer, pixels: IntArray) {
-        // Channel-first layout: all R, then all G, then all B
-        for (channel in 0 until MODEL_CHANNELS) {
-            for (color in pixels) {
-                val value = when (channel) {
-                    0 -> (color shr 16) and 0xFF
-                    1 -> (color shr 8) and 0xFF
-                    else -> color and 0xFF
-                }
-                buffer.put(value / 255f)
             }
         }
     }
