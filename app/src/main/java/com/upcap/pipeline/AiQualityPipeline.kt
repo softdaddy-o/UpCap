@@ -17,6 +17,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Build
 import com.upcap.model.QualityModel
 import com.upcap.model.QualityPreset
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,14 @@ import kotlin.coroutines.coroutineContext
 class AiQualityPipeline @Inject constructor(
     private val context: Context
 ) {
+    private val isEmulator: Boolean by lazy {
+        Build.HARDWARE in setOf("goldfish", "ranchu") ||
+            Build.FINGERPRINT.startsWith("generic") ||
+            Build.FINGERPRINT.lowercase().contains("emulator") ||
+            Build.MODEL.contains("sdk_gphone") ||
+            Build.PRODUCT.startsWith("sdk_")
+    }
+
     // Reusable per-tile buffers. Allocated lazily, sized by the first tile,
     // then reused for the remainder of the run. processTile is called from a
     // single coroutine so there is no concurrent access.
@@ -117,7 +126,8 @@ class AiQualityPipeline @Inject constructor(
                 // by the first-tile timing verdict below.
                 try {
                     addNnapi(EnumSet.noneOf(NNAPIFlags::class.java))
-                    onLog("실행 공급자(EP) 등록: NNAPI — 지원 연산은 NPU/GPU, 미지원은 CPU")
+                    val hwTag = "HW=${Build.HARDWARE}, MODEL=${Build.MODEL}${if (isEmulator) " (에뮬레이터)" else ""}"
+                    onLog("실행 공급자(EP) 등록: NNAPI — 지원 연산은 NPU/GPU, 미지원은 CPU · $hwTag")
                 } catch (t: Throwable) {
                     onLog("실행 공급자(EP) 등록: CPU 전용 — NNAPI 등록 실패 (${t.message ?: "알 수 없음"})")
                 }
@@ -566,6 +576,11 @@ class AiQualityPipeline @Inject constructor(
                     // Thresholds are calibrated for 128→512 XLSR-class models where
                     // NPU runs <15ms and CPU takes 60–400ms for the same tile.
                     val verdict = when {
+                        // Emulator NNAPI resolves to the `nnapi-reference` CPU
+                        // software driver — the timing-based heuristic can't tell
+                        // it apart from partial NPU offload on a real device, so
+                        // label explicitly regardless of speed.
+                        isEmulator -> "🐢 CPU 실행 중 — 에뮬레이터(${Build.HARDWARE})는 NNAPI CPU 레퍼런스만 제공합니다"
                         tileElapsed < 20 -> "🚀 NPU/GPU 가속 실행 중"
                         tileElapsed < 60 -> "⚡ NPU 부분 가속 (일부 연산 CPU 폴백)"
                         else -> "🐢 CPU 실행 중 — NNAPI가 이 모델을 NPU에 올리지 못했습니다"
